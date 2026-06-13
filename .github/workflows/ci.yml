@@ -26,12 +26,13 @@ jobs:
         run: go test -race -count=1 -v ./...
 
       - name: Run tests with coverage
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          files: ./coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.txt
           fail_ci_if_error: false
 
   lint:
