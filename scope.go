@@ -107,7 +107,6 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 			s.errOnce.Do(func() {
 				s.err = err
 			})
-			return
 		}
 
 		if err := fn(s.ctx); err != nil {
@@ -115,12 +114,6 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 				s.err = err
 				s.cancel()
 			})
-		}
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-			return
 		}
 	}()
 }
