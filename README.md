@@ -64,17 +64,6 @@ The `scope.Run` block is a hard boundary: it does not return until every gorouti
 
 Raw `go func() { ... }()` calls do none of this. They are also the single biggest source of goroutine leaks in real Go codebases.
 
-## Status
-
-This is an early release. The core API (`Run`, `Go`) is stable enough to use, but additional features are planned:
-
-- `scope.Defer` for cleanup that runs after children complete
-- Spawn origin tracking for leak diagnostics
-- A `go/analysis` linter to flag raw `go` statements inside `scope.Run`
-- Integration with Go 1.26's `goroutineleak` profile
-
-The version is `v0.x.x` while the surface settles. Breaking changes between minor versions are possible until `v1.0.0`.
-
 ## Documentation
 
 Full API reference: [pkg.go.dev/github.com/kakkky/scope](https://pkg.go.dev/github.com/kakkky/scope)
