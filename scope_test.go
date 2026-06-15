@@ -55,6 +55,7 @@ func TestRun(t *testing.T) {
 				return tt.body(s, &count)
 			})
 			assert.NoError(t, err)
+			assert.Equal(t, tt.wantCount, count.Load())
 		})
 	}
 }
