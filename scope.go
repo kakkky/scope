@@ -35,6 +35,9 @@ type Scope struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	mu     sync.Mutex
+	closed bool
+
 	errOnce sync.Once
 	err     error
 }
@@ -72,6 +75,10 @@ func Run(ctx context.Context, body func(s *Scope) error) error {
 		})
 	}
 
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+
 	s.wg.Wait()
 	return s.err
 }
@@ -89,8 +96,18 @@ func Run(ctx context.Context, body func(s *Scope) error) error {
 //
 // Go may be called from inside body, from inside another goroutine spawned by
 // the same scope, or recursively, as long as Run has not yet returned.
+//
+// Calling Go after Run has returned panics. Goroutines must be spawned while
+// Run is executing.
 func (s *Scope) Go(fn func(ctx context.Context) error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		panic("scope: misuse: Go called outside scope lifetime")
+	}
 	s.wg.Add(1)
+	s.mu.Unlock()
+
 	go func() {
 		defer s.wg.Done()
 		defer func() {
