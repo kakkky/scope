@@ -147,3 +147,42 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 		}
 	}()
 }
+
+// Scope creates a child scope nested under s and runs body within it.
+//
+// Scope is synchronous: it does not return until body has returned and every
+// goroutine spawned in the child scope has finished. The child scope's
+// context is derived from s's context, so cancellation of s propagates to
+// the child and to all goroutines spawned within it.
+//
+// Errors and panics originating inside the child scope (from body itself or
+// from any goroutine spawned via the child's Go) are propagated to s through
+// the same mechanism as Scope.Go: the first such error becomes the result of
+// the enclosing Run (unless an earlier error has already been recorded), and
+// s's context is canceled so sibling goroutines spawned via s.Go can observe
+// cancellation.
+//
+// Scope makes the nested structure of a scope tree explicit but does not
+// itself introduce concurrency. To run multiple child scopes in parallel,
+// wrap each Scope call in s.Go.
+//
+// The opts parameter is reserved for future use; currently no options are
+// defined and any provided values are ignored.
+//
+// Calling Scope after Run has returned panics, matching the behavior of
+// Scope.Go.
+func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
+	s.cond.L.Lock()
+	if s.closed {
+		s.cond.L.Unlock()
+		panic("scope: misuse: Scope called outside scope lifetime")
+	}
+	s.cond.L.Unlock()
+
+	if err := Run(s.ctx, body); err != nil {
+		s.errOnce.Do(func() {
+			s.err = err
+			s.cancel()
+		})
+	}
+}
