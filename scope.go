@@ -58,7 +58,10 @@ type Scope struct {
 // The context passed to body and to each spawned goroutine is derived from
 // parent and is canceled as described above. Callers should observe this
 // context (typically via ctx.Done()) to participate in cancellation.
-func Run(ctx context.Context, body func(s *Scope) error) error {
+//
+// The opts parameter is reserved for future use; currently no options are
+// defined and any provided values are ignored.
+func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Scope{
 		ctx:    ctx,
