@@ -236,3 +236,24 @@ func TestRun_Panic(t *testing.T) {
 		assert.True(t, observed.Load(), "sibling did not observe cancel after panic")
 	})
 }
+
+func TestRun_GoAfterReturned(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Go panics when called after Run returned", func(t *testing.T) {
+		t.Parallel()
+
+		var captured *scope.Scope
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			captured = s
+			return nil
+		})
+		assert.NoError(t, err)
+		assert.PanicsWithValue(t,
+			"scope: misuse: Go called outside scope lifetime",
+			func() {
+				captured.Go(func(ctx context.Context) error { return nil })
+			},
+		)
+	})
+}

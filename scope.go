@@ -33,7 +33,10 @@ import (
 type Scope struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
+
+	cond    *sync.Cond
+	activeG int
+	closed  bool
 
 	errOnce sync.Once
 	err     error
@@ -60,6 +63,7 @@ func Run(ctx context.Context, body func(s *Scope) error) error {
 	s := &Scope{
 		ctx:    ctx,
 		cancel: cancel,
+		cond:   sync.NewCond(&sync.Mutex{}),
 	}
 	defer s.cancel()
 
@@ -72,7 +76,13 @@ func Run(ctx context.Context, body func(s *Scope) error) error {
 		})
 	}
 
-	s.wg.Wait()
+	s.cond.L.Lock()
+	for s.activeG > 0 {
+		s.cond.Wait()
+	}
+	s.closed = true
+	s.cond.L.Unlock()
+
 	return s.err
 }
 
@@ -89,10 +99,27 @@ func Run(ctx context.Context, body func(s *Scope) error) error {
 //
 // Go may be called from inside body, from inside another goroutine spawned by
 // the same scope, or recursively, as long as Run has not yet returned.
+//
+// Calling Go after Run has returned panics. Goroutines must be spawned while
+// Run is executing.
 func (s *Scope) Go(fn func(ctx context.Context) error) {
-	s.wg.Add(1)
+	s.cond.L.Lock()
+	if s.closed {
+		s.cond.L.Unlock()
+		panic("scope: misuse: Go called outside scope lifetime")
+	}
+	s.activeG++
+	s.cond.L.Unlock()
+
 	go func() {
-		defer s.wg.Done()
+		defer func() {
+			s.cond.L.Lock()
+			s.activeG--
+			if s.activeG == 0 {
+				s.cond.Signal()
+			}
+			s.cond.L.Unlock()
+		}()
 		defer func() {
 			if r := recover(); r != nil {
 				s.errOnce.Do(func() {
