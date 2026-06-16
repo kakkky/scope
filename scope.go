@@ -62,31 +62,7 @@ type Scope struct {
 // The opts parameter is reserved for future use; currently no options are
 // defined and any provided values are ignored.
 func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
-	ctx, cancel := context.WithCancel(ctx)
-	s := &Scope{
-		ctx:    ctx,
-		cancel: cancel,
-		cond:   sync.NewCond(&sync.Mutex{}),
-	}
-	defer s.cancel()
-
-	err := body(s)
-
-	if err != nil {
-		s.errOnce.Do(func() {
-			s.err = err
-			s.cancel()
-		})
-	}
-
-	s.cond.L.Lock()
-	for s.activeG > 0 {
-		s.cond.Wait()
-	}
-	s.closed = true
-	s.cond.L.Unlock()
-
-	return s.err
+	return run(ctx, body, opts...)
 }
 
 // Go starts fn in a new goroutine bound to the scope.
@@ -181,10 +157,38 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	}
 	s.cond.L.Unlock()
 
-	if err := Run(s.ctx, body); err != nil {
+	if err := run(s.ctx, body, opts...); err != nil {
 		s.errOnce.Do(func() {
 			s.err = err
 			s.cancel()
 		})
 	}
+}
+
+func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
+	ctx, cancel := context.WithCancel(ctx)
+	s := &Scope{
+		ctx:    ctx,
+		cancel: cancel,
+		cond:   sync.NewCond(&sync.Mutex{}),
+	}
+	defer s.cancel()
+
+	err := body(s)
+
+	if err != nil {
+		s.errOnce.Do(func() {
+			s.err = err
+			s.cancel()
+		})
+	}
+
+	s.cond.L.Lock()
+	for s.activeG > 0 {
+		s.cond.Wait()
+	}
+	s.closed = true
+	s.cond.L.Unlock()
+
+	return s.err
 }
