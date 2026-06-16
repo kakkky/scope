@@ -94,7 +94,33 @@ func ExampleScope_Go_dynamicSpawn() {
 
 	fmt.Println("err:", err)
 	fmt.Println("count:", count.Load())
+
 	// Output:
 	// err: <nil>
 	// count: 3
+}
+
+// ExampleScope_Scope shows how a child scope groups work and blocks until
+// every goroutine spawned inside it has finished.
+func ExampleScope_Scope() {
+	ctx := context.Background()
+
+	err := scope.Run(ctx, func(s *scope.Scope) error {
+		s.Scope(func(child *scope.Scope) error {
+			child.Go(func(ctx context.Context) error {
+				fmt.Println("inside child scope")
+				return nil
+			})
+			return nil
+		})
+		fmt.Println("after child scope")
+		return nil
+	})
+
+	fmt.Println("err:", err)
+
+	// Output:
+	// inside child scope
+	// after child scope
+	// err: <nil>
 }
