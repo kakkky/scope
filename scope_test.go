@@ -130,7 +130,7 @@ func TestRun_Error(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := scope.Run(context.Background(), tt.body)
+			err := scope.Run(t.Context(), tt.body)
 			assert.ErrorIs(t, err, tt.wantErr)
 		})
 	}
@@ -257,4 +257,117 @@ func TestRun_GoAfterReturned(t *testing.T) {
 			},
 		)
 	})
+}
+
+func TestScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		body      func(s *scope.Scope, count *atomic.Int64) error
+		wantCount int64
+	}{
+		{
+			name: "empty child body returns nil",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Scope(func(child *scope.Scope) error {
+					return nil
+				})
+				return nil
+			},
+			wantCount: 0,
+		},
+		{
+			name: "child spawns 10 goroutines, all finish before Scope returns",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Scope(func(child *scope.Scope) error {
+					for range 10 {
+						child.Go(func(ctx context.Context) error {
+							count.Add(1)
+							return nil
+						})
+					}
+					return nil
+				})
+				return nil
+			},
+			wantCount: 10,
+		},
+		{
+			name: "grandchild scope spawns goroutines at each level",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						count.Add(1)
+						return nil
+					})
+					child.Scope(func(grandchild *scope.Scope) error {
+						for range 3 {
+							grandchild.Go(func(ctx context.Context) error {
+								count.Add(1)
+								return nil
+							})
+						}
+						return nil
+					})
+					return nil
+				})
+				return nil
+			},
+			wantCount: 4,
+		},
+		{
+			name: "parent mixes s.Go and s.Scope as siblings",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Go(func(ctx context.Context) error {
+					count.Add(1)
+					return nil
+				})
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						count.Add(1)
+						return nil
+					})
+					return nil
+				})
+				return nil
+			},
+			wantCount: 2,
+		},
+		{
+			name: "sibling Scopes run sequentially",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						count.Add(1)
+						return nil
+					})
+					return nil
+				})
+				s.Scope(func(child *scope.Scope) error {
+					if count.Load() != 1 {
+						return assert.AnError
+					}
+					child.Go(func(ctx context.Context) error {
+						count.Add(1)
+						return nil
+					})
+					return nil
+				})
+				return nil
+			},
+			wantCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var count atomic.Int64
+			err := scope.Run(t.Context(), func(s *scope.Scope) error {
+				return tt.body(s, &count)
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantCount, count.Load())
+		})
+	}
 }
