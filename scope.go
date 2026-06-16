@@ -163,8 +163,10 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 // cancellation.
 //
 // Scope makes the nested structure of a scope tree explicit but does not
-// itself introduce concurrency. To run multiple child scopes in parallel,
-// wrap each Scope call in s.Go.
+// itself introduce concurrency.
+//
+// Scope is intended to be called from the body of Run or from another
+// Scope's body, not from a goroutine spawned via Scope.Go.
 //
 // The opts parameter is reserved for future use; currently no options are
 // defined and any provided values are ignored.
