@@ -124,4 +124,3 @@ func ExampleScope_Scope() {
 	// after child scope
 	// err: <nil>
 }
-
