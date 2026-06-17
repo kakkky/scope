@@ -336,6 +336,108 @@ func TestRun_PanicInGo(t *testing.T) {
 
 }
 
+func TestRun_WithSupervisor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("goroutine error does not cancel sibling goroutines", func(t *testing.T) {
+		t.Parallel()
+
+		ch := make(chan struct{})
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				close(ch)
+				return assert.AnError
+			})
+			s.Go(func(ctx context.Context) error {
+				<-ch
+				observed.Store(ctx.Err() == nil)
+				return nil
+			})
+			return nil
+		}, scope.WithSupervisor())
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled")
+	})
+
+	t.Run("panic does not cancel sibling goroutines", func(t *testing.T) {
+		t.Parallel()
+
+		ch := make(chan struct{})
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				close(ch)
+				panic("boom")
+			})
+			s.Go(func(ctx context.Context) error {
+				<-ch
+				observed.Store(ctx.Err() == nil)
+				return nil
+			})
+			return nil
+		}, scope.WithSupervisor())
+
+		assert.Error(t, err)
+		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled after panic")
+	})
+
+	t.Run("body error cancels goroutines even in supervisor mode", func(t *testing.T) {
+		t.Parallel()
+
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				<-ctx.Done()
+				observed.Store(true)
+				return ctx.Err()
+			})
+			return assert.AnError
+		}, scope.WithSupervisor())
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.True(t, observed.Load(), "goroutine should have been cancelled by body error")
+	})
+
+	t.Run("child scope goroutine error does not cancel sibling or parent goroutines", func(t *testing.T) {
+		t.Parallel()
+
+		ch1 := make(chan struct{})
+		ch2 := make(chan struct{})
+		var siblingObserved, parentObserved atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Scope(func(child *scope.Scope) error {
+				child.Go(func(ctx context.Context) error {
+					close(ch1)
+					return assert.AnError
+				})
+				child.Go(func(ctx context.Context) error {
+					<-ch1
+					siblingObserved.Store(ctx.Err() == nil)
+					close(ch2)
+					return nil
+				})
+				return nil
+			}, scope.WithSupervisor())
+			s.Go(func(ctx context.Context) error {
+				<-ch2
+				parentObserved.Store(ctx.Err() == nil)
+				return nil
+			})
+			return nil
+		})
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.True(t, siblingObserved.Load(), "sibling goroutine within child scope should not have been cancelled")
+		assert.True(t, parentObserved.Load(), "parent goroutine should not have been cancelled")
+	})
+}
+
 func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 	t.Parallel()
 
