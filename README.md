@@ -48,15 +48,16 @@ func main() {
 }
 ```
 
-The `scope.Run` block is a hard boundary: it does not return until every goroutine spawned via `s.Go` has finished. The first non-nil error cancels the others, panics are recovered into errors, and the derived context propagates cancellation downstream.
+The `scope.Run` block is a hard boundary: it does not return until every goroutine spawned via `s.Go` has finished. When the first non-nil error occurs, the scope's context is cancelled so sibling goroutines can observe `ctx.Done()` and exit; panics are recovered into errors, and cancellation propagates downstream.
 
 ## What it gives you
 
 - **Lifetime bound to a block.** Goroutines spawned with `s.Go` cannot outlive the enclosing `scope.Run` call. There is no `Wait()` to forget — the boundary is the closing brace.
-- **First-error-wins, with sibling cancellation.** When any goroutine returns a non-nil error, the scope's context is cancelled so siblings can observe `ctx.Done()` and exit.
+- **First-error-wins, with context cancellation.** Every goroutine receives the scope's context as an argument. When any goroutine returns a non-nil error, the context is cancelled so siblings can observe `ctx.Done()` and exit.
 - **Panic safety.** A panic in any spawned goroutine is recovered, formatted with its stack trace, and returned through the same error path. Your process does not crash.
-- **Context propagation.** Every goroutine receives the scope's context as an argument, so missing the cancellation signal becomes a misuse you can spot in code review (or with a linter).
+- **Nested scopes.** `s.Scope` creates a child scope whose context is derived from the parent's. The call is synchronous — it blocks until the child's body and all goroutines within it finish. Cancellation propagates from parent to child; errors in the child propagate back and cancel the parent's context.
 - **Dynamic spawning.** `s.Go` may be called from inside other goroutines, recursively, or after the body has returned — all of them are still bound to the same scope.
+
 
 ## Why not `errgroup` or raw goroutines?
 

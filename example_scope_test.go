@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/kakkky/scope"
@@ -34,9 +35,9 @@ func ExampleRun() {
 	// task B
 }
 
-// ExampleRun_errorPropagation shows how the first non-nil error cancels
-// the scope and is returned to the caller.
-func ExampleRun_errorPropagation() {
+// ExampleRun_errorCancelsContext shows how the first non-nil error cancels
+// the scope's context so sibling goroutines can observe ctx.Done() and exit.
+func ExampleRun_errorCancelsContext() {
 	ctx := context.Background()
 
 	err := scope.Run(ctx, func(s *scope.Scope) error {
@@ -45,6 +46,7 @@ func ExampleRun_errorPropagation() {
 		})
 		s.Go(func(ctx context.Context) error {
 			<-ctx.Done()
+			fmt.Println("task B: context cancelled")
 			return ctx.Err()
 		})
 		return nil
@@ -52,7 +54,9 @@ func ExampleRun_errorPropagation() {
 
 	fmt.Println("err:", err)
 
-	// Output: err: task A failed
+	// Output:
+	// task B: context cancelled
+	// err: task A failed
 }
 
 // ExampleRun_panicRecovery shows that a panic inside a spawned goroutine is
@@ -67,8 +71,7 @@ func ExampleRun_panicRecovery() {
 		return nil
 	})
 
-	// err contains "scope: panic recovered: something bad" followed by a stack trace.
-	fmt.Println(err != nil)
+	fmt.Println(strings.Contains(err.Error(), "scope: panic recovered: something bad"))
 
 	// Output: true
 }
@@ -81,7 +84,7 @@ func ExampleScope_Go_dynamicSpawn() {
 
 	err := scope.Run(ctx, func(s *scope.Scope) error {
 		s.Go(func(ctx context.Context) error {
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				s.Go(func(ctx context.Context) error {
 					count.Add(1)
 					return nil
@@ -123,4 +126,28 @@ func ExampleScope_Scope() {
 	// inside child scope
 	// after child scope
 	// err: <nil>
+}
+
+// ExampleScope_Scope_errorCancelsContext shows that an error in a child scope
+// cancels the parent's context so sibling goroutines can observe ctx.Done() and exit.
+func ExampleScope_Scope_errorCancelsContext() {
+	ctx := context.Background()
+
+	err := scope.Run(ctx, func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error {
+			<-ctx.Done()
+			fmt.Println("sibling: context cancelled")
+			return ctx.Err()
+		})
+		s.Scope(func(child *scope.Scope) error {
+			return errors.New("child scope failed")
+		})
+		return nil
+	})
+
+	fmt.Println("err:", err)
+
+	// Output:
+	// sibling: context cancelled
+	// err: child scope failed
 }
