@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/kakkky/scope"
@@ -70,10 +71,9 @@ func ExampleRun_panicRecovery() {
 		return nil
 	})
 
-	// err contains "scope: panic recovered: something bad" followed by a stack trace.
-	fmt.Println("err:", err)
+	fmt.Println(strings.Contains(err.Error(), "scope: panic recovered: something bad"))
 
-	// Output: err: scope: panic recovered: something bad ...
+	// Output: true
 }
 
 // ExampleScope_Go_dynamicSpawn shows that goroutines can be spawned dynamically
