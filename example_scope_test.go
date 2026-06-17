@@ -76,6 +76,27 @@ func ExampleRun_panicRecovery() {
 	// Output: true
 }
 
+func ExampleRun_withSupervisor() {
+	ctx := context.Background()
+	ch := make(chan struct{})
+
+	scope.Run(ctx, func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error {
+			close(ch)
+			return errors.New("task failed")
+		})
+		s.Go(func(ctx context.Context) error {
+			<-ch
+			fmt.Println("ctx cancelled:", ctx.Err() != nil)
+			return nil
+		})
+		return nil
+	}, scope.WithSupervisor())
+
+	// Output:
+	// ctx cancelled: false
+}
+
 // ExampleScope_Go_dynamicSpawn shows that goroutines can be spawned dynamically
 // from within other goroutines, as long as Run has not yet returned.
 func ExampleScope_Go_dynamicSpawn() {
@@ -101,6 +122,39 @@ func ExampleScope_Go_dynamicSpawn() {
 	// Output:
 	// err: <nil>
 	// count: 3
+}
+
+// In supervisor mode, a goroutine spawned from within another goroutine is
+// treated as a sibling at the scope level in terms of context cancellation.
+// Even if the spawning goroutine fails, neither the inner goroutine nor
+// sibling goroutines have their context cancelled.
+func ExampleScope_Go_errorOccuredFromInnerGo_runWithSupervisor() {
+	ctx := context.Background()
+	ch1 := make(chan struct{})
+	ch2 := make(chan struct{})
+
+	scope.Run(ctx, func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error {
+			s.Go(func(ctx context.Context) error {
+				<-ch1
+				fmt.Println("inner ctx cancelled:", ctx.Err() != nil)
+				close(ch2)
+				return nil
+			})
+			close(ch1)
+			return errors.New("task failed")
+		})
+		s.Go(func(ctx context.Context) error {
+			<-ch2
+			fmt.Println("sibling ctx cancelled:", ctx.Err() != nil)
+			return nil
+		})
+		return nil
+	}, scope.WithSupervisor())
+
+	// Output:
+	// inner ctx cancelled: false
+	// sibling ctx cancelled: false
 }
 
 // ExampleScope_Scope shows how a child scope groups work and blocks until
@@ -150,4 +204,38 @@ func ExampleScope_Scope_errorCancelsContext() {
 	// Output:
 	// sibling: context cancelled
 	// err: child scope failed
+}
+
+// In supervisor mode, goroutine failures within a child scope do not cancel
+// sibling goroutines inside that scope, nor goroutines in the parent scope.
+func ExampleScope_Scope_errorOccuredFromGo_WithSupervisor() {
+	ctx := context.Background()
+	ch1 := make(chan struct{})
+
+	err := scope.Run(ctx, func(s *scope.Scope) error {
+		s.Scope(func(child *scope.Scope) error {
+			child.Go(func(ctx context.Context) error {
+				close(ch1)
+				return errors.New("task failed")
+			})
+			child.Go(func(ctx context.Context) error {
+				<-ch1
+				fmt.Println("sibling ctx cancelled:", ctx.Err() != nil)
+				return nil
+			})
+			return nil
+		}, scope.WithSupervisor())
+		s.Go(func(ctx context.Context) error {
+			fmt.Println("parent level goroutine ctx cancelled:", ctx.Err() != nil)
+			return nil
+		})
+		return nil
+	})
+
+	fmt.Println("err:", err)
+
+	// Output:
+	// sibling ctx cancelled: false
+	// parent level goroutine ctx cancelled: false
+	// err: task failed
 }
