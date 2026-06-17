@@ -40,6 +40,8 @@ type Scope struct {
 
 	errOnce sync.Once
 	err     error
+
+	supervisor bool
 }
 
 // Run executes body inside a new Scope derived from parent and waits for all
@@ -58,9 +60,6 @@ type Scope struct {
 // The context passed to body and to each spawned goroutine is derived from
 // parent and is canceled as described above. Callers should observe this
 // context (typically via ctx.Done()) to participate in cancellation.
-//
-// The opts parameter is reserved for future use; currently no options are
-// defined and any provided values are ignored.
 func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	return run(ctx, body, opts...)
 }
@@ -103,7 +102,9 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 			if r := recover(); r != nil {
 				s.errOnce.Do(func() {
 					s.err = fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
-					s.cancel()
+					if !s.supervisor {
+						s.cancel()
+					}
 				})
 				return
 			}
@@ -118,7 +119,9 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 		if err := fn(s.ctx); err != nil {
 			s.errOnce.Do(func() {
 				s.err = err
-				s.cancel()
+				if !s.supervisor {
+					s.cancel()
+				}
 			})
 		}
 	}()
@@ -144,12 +147,14 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 // Scope is intended to be called from the body of Run or from another
 // Scope's body, not from a goroutine spawned via Scope.Go.
 //
-// The opts parameter is reserved for future use; currently no options are
-// defined and any provided values are ignored.
-//
 // Calling Scope after Run has returned panics, matching the behavior of
 // Scope.Go.
 func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
+	o := &options{}
+	for _, opt := range opts {
+		opt(o)
+	}
+
 	s.cond.L.Lock()
 	if s.closed {
 		s.cond.L.Unlock()
@@ -160,17 +165,25 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	if err := run(s.ctx, body, opts...); err != nil {
 		s.errOnce.Do(func() {
 			s.err = err
-			s.cancel()
+			if !o.supervisor {
+				s.cancel()
+			}
 		})
 	}
 }
 
 func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
+	o := &options{}
+	for _, opt := range opts {
+		opt(o)
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Scope{
-		ctx:    ctx,
-		cancel: cancel,
-		cond:   sync.NewCond(&sync.Mutex{}),
+		ctx:        ctx,
+		cancel:     cancel,
+		cond:       sync.NewCond(&sync.Mutex{}),
+		supervisor: o.supervisor,
 	}
 	defer s.cancel()
 
