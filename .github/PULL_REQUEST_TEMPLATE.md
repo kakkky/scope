@@ -4,6 +4,12 @@
 ## Related Issues
 <!-- e.g. Closes #123, Refs #456 -->
 
+<!-- ## Example Code (for new features only)
+```go
+// Add usage example here
+```
+-->
+
 ## Checklist
 - [ ] Tests added or updated
 - [ ] GoDoc comments updated for exported APIs

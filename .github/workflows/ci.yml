@@ -22,18 +22,15 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Run tests with race detector
-        run: go test -race -count=1 -v ./...
-
-      - name: Run tests with coverage
-        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Run tests
+        run: go test -race -coverprofile=coverage.txt -covermode=atomic -count=100 ./...
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.txt
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   lint:
     name: Lint
