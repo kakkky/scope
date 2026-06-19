@@ -25,6 +25,18 @@ func WithSupervisor() Option {
 	}
 }
 
+// WithErrAggregation returns an Option that enables error aggregation for the scope.
+//
+// By default, only the first non-nil error is recorded (first-error-wins).
+// With this option, all errors from goroutines and the body are collected and
+// returned as a single error via errors.Join when Run returns.
+//
+// This option is not inherited by child scopes created via Scope.Scope;
+// each scope must opt in independently.
+//
+// WithErrAggregation is most useful in combination with WithSupervisor,
+// where goroutines continue running after a sibling fails and multiple
+// errors can accumulate.
 func WithErrAggregation() Option {
 	return func(o *options) {
 		o.errAggregation = true
