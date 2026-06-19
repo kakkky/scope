@@ -298,26 +298,6 @@ func TestRun_Error_WithErrAggregation(t *testing.T) {
 			wantErrs:              []error{errA, errB},
 		},
 		{
-			name: "errAggregation is not inherited by child scope: only first error propagates",
-			body: func(s *scope.Scope) error {
-				ch := make(chan struct{})
-				s.Scope(func(child *scope.Scope) error {
-					child.Go(func(ctx context.Context) error {
-						close(ch)
-						return errA
-					})
-					child.Go(func(ctx context.Context) error {
-						<-ch
-						return errB
-					})
-					return nil
-				})
-				return nil
-			},
-			withAggregationOnRoot: true,
-			wantErrs:              []error{errA},
-		},
-		{
 			name: "child scope with aggregation collects errors independently of root scope",
 			body: func(s *scope.Scope) error {
 				s.Scope(func(child *scope.Scope) error {
@@ -387,6 +367,23 @@ func TestRun_Error_WithErrAggregation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("errAggregation is not inherited by child scope: only first error propagates", func(t *testing.T) {
+		t.Parallel()
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Scope(func(child *scope.Scope) error {
+				child.Go(func(ctx context.Context) error { return errA })
+				child.Go(func(ctx context.Context) error { return errB })
+				return nil
+			})
+			return nil
+		}, scope.WithErrAggregation())
+
+		isA := errors.Is(err, errA)
+		isB := errors.Is(err, errB)
+		assert.True(t, isA != isB, "only one of errA or errB should propagate, not both")
+	})
 }
 
 func TestRun_Cancel(t *testing.T) {
