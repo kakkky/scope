@@ -166,6 +166,7 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	}
 }
 
+// run creates a new Scope, executes body, and waits for all spawned goroutines to finish.
 func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	o := &options{}
 	for _, opt := range opts {
