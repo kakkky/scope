@@ -110,12 +110,6 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 			}
 		}()
 
-		if err := s.ctx.Err(); err != nil {
-			s.errOnce.Do(func() {
-				s.err = err
-			})
-		}
-
 		if err := fn(s.ctx); err != nil {
 			s.errOnce.Do(func() {
 				s.err = err
