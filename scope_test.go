@@ -260,10 +260,10 @@ func TestRun_Error_WithErrAggregation(t *testing.T) {
 	)
 
 	tests := []struct {
-		name                    string
-		body                    func(s *scope.Scope) error
-		withAggregationOnRoot   bool // whether to apply WithErrAggregation to the root scope passed to Run
-		wantErrs                []error
+		name                  string
+		body                  func(s *scope.Scope) error
+		withAggregationOnRoot bool // whether to apply WithErrAggregation to the root scope passed to Run
+		wantErrs              []error
 	}{
 		{
 			name: "all goroutine errors are collected",
