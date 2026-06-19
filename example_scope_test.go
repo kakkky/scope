@@ -97,6 +97,47 @@ func ExampleRun_withSupervisor() {
 	// ctx cancelled: false
 }
 
+// ExampleRun_withErrAggregation shows that all goroutine errors are collected
+// when WithErrAggregation is enabled. Without it, only the first error is returned.
+func ExampleRun_withErrAggregation() {
+	errA := errors.New("task A failed")
+	errB := errors.New("task B failed")
+
+	err := scope.Run(context.Background(), func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error { return errA })
+		s.Go(func(ctx context.Context) error { return errB })
+		return nil
+	}, scope.WithErrAggregation())
+
+	fmt.Println(errors.Is(err, errA))
+	fmt.Println(errors.Is(err, errB))
+
+	// Output:
+	// true
+	// true
+}
+
+// ExampleRun_withSupervisorAndErrAggregation shows that combining WithSupervisor
+// and WithErrAggregation allows collecting all errors from goroutines that run
+// to completion without being cancelled by sibling failures.
+func ExampleRun_withSupervisorAndErrAggregation() {
+	errA := errors.New("task A failed")
+	errB := errors.New("task B failed")
+
+	err := scope.Run(context.Background(), func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error { return errA })
+		s.Go(func(ctx context.Context) error { return errB })
+		return nil
+	}, scope.WithSupervisor(), scope.WithErrAggregation())
+
+	fmt.Println(errors.Is(err, errA))
+	fmt.Println(errors.Is(err, errB))
+
+	// Output:
+	// true
+	// true
+}
+
 // ExampleScope_Go_dynamicSpawn shows that goroutines can be spawned dynamically
 // from within other goroutines, as long as Run has not yet returned.
 func ExampleScope_Go_dynamicSpawn() {
@@ -206,27 +247,41 @@ func ExampleScope_Scope_errorCancelsContext() {
 	// err: child scope failed
 }
 
-// ExampleRun_withErrAggregation shows that all goroutine errors are collected
-// when WithErrAggregation is enabled. Without it, only the first error is returned.
-func ExampleRun_withErrAggregation() {
-	errA := errors.New("task A failed")
-	errB := errors.New("task B failed")
+// In supervisor mode, goroutine failures within a child scope do not cancel
+// sibling goroutines inside that scope, nor goroutines in the parent scope.
+func ExampleScope_Scope_errorOccuredFromGoWithSupervisor() {
+	ctx := context.Background()
+	ch1 := make(chan struct{})
 
-	err := scope.Run(context.Background(), func(s *scope.Scope) error {
-		s.Go(func(ctx context.Context) error { return errA })
-		s.Go(func(ctx context.Context) error { return errB })
+	err := scope.Run(ctx, func(s *scope.Scope) error {
+		s.Scope(func(child *scope.Scope) error {
+			child.Go(func(ctx context.Context) error {
+				close(ch1)
+				return errors.New("task failed")
+			})
+			child.Go(func(ctx context.Context) error {
+				<-ch1
+				fmt.Println("sibling ctx cancelled:", ctx.Err() != nil)
+				return nil
+			})
+			return nil
+		}, scope.WithSupervisor())
+		s.Go(func(ctx context.Context) error {
+			fmt.Println("parent level goroutine ctx cancelled:", ctx.Err() != nil)
+			return nil
+		})
 		return nil
-	}, scope.WithErrAggregation())
+	})
 
-	fmt.Println(errors.Is(err, errA))
-	fmt.Println(errors.Is(err, errB))
+	fmt.Println("err:", err)
 
 	// Output:
-	// true
-	// true
+	// sibling ctx cancelled: false
+	// parent level goroutine ctx cancelled: false
+	// err: task failed
 }
 
-// ExampleScope_Scope_withErrAggregation_parentAndChild shows that each scope
+// ExampleScope_Scope_errAggregationParentAndChild shows that each scope
 // must opt in to WithErrAggregation independently — it is not inherited.
 // When both parent and child have WithErrAggregation, all errors from both
 // levels are visible in the result.
@@ -309,59 +364,4 @@ func ExampleScope_Scope_errAggregationParentOnly() {
 
 	// Output:
 	// true
-}
-
-// ExampleRun_withSupervisorAndErrAggregation shows that combining WithSupervisor
-// and WithErrAggregation allows collecting all errors from goroutines that run
-// to completion without being cancelled by sibling failures.
-func ExampleRun_withSupervisorAndErrAggregation() {
-	errA := errors.New("task A failed")
-	errB := errors.New("task B failed")
-
-	err := scope.Run(context.Background(), func(s *scope.Scope) error {
-		s.Go(func(ctx context.Context) error { return errA })
-		s.Go(func(ctx context.Context) error { return errB })
-		return nil
-	}, scope.WithSupervisor(), scope.WithErrAggregation())
-
-	fmt.Println(errors.Is(err, errA))
-	fmt.Println(errors.Is(err, errB))
-
-	// Output:
-	// true
-	// true
-}
-
-// In supervisor mode, goroutine failures within a child scope do not cancel
-// sibling goroutines inside that scope, nor goroutines in the parent scope.
-func ExampleScope_Scope_errorOccuredFromGoWithSupervisor() {
-	ctx := context.Background()
-	ch1 := make(chan struct{})
-
-	err := scope.Run(ctx, func(s *scope.Scope) error {
-		s.Scope(func(child *scope.Scope) error {
-			child.Go(func(ctx context.Context) error {
-				close(ch1)
-				return errors.New("task failed")
-			})
-			child.Go(func(ctx context.Context) error {
-				<-ch1
-				fmt.Println("sibling ctx cancelled:", ctx.Err() != nil)
-				return nil
-			})
-			return nil
-		}, scope.WithSupervisor())
-		s.Go(func(ctx context.Context) error {
-			fmt.Println("parent level goroutine ctx cancelled:", ctx.Err() != nil)
-			return nil
-		})
-		return nil
-	})
-
-	fmt.Println("err:", err)
-
-	// Output:
-	// sibling ctx cancelled: false
-	// parent level goroutine ctx cancelled: false
-	// err: task failed
 }
