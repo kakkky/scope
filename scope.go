@@ -106,15 +106,7 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
-				if s.errAggregation {
-					s.errsMu.Lock()
-					s.errs = append(s.errs, err)
-					s.errsMu.Unlock()
-				} else {
-					s.errOnce.Do(func() {
-						s.err = err
-					})
-				}
+				s.recordErr(err)
 				if !s.supervisor {
 					s.cancel()
 				}
@@ -123,15 +115,7 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 		}()
 
 		if err := fn(s.ctx); err != nil {
-			if s.errAggregation {
-				s.errsMu.Lock()
-				s.errs = append(s.errs, err)
-				s.errsMu.Unlock()
-			} else {
-				s.errOnce.Do(func() {
-					s.err = err
-				})
-			}
+			s.recordErr(err)
 			if !s.supervisor {
 				s.cancel()
 			}
@@ -175,15 +159,7 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	s.cond.L.Unlock()
 
 	if err := run(s.ctx, body, opts...); err != nil {
-		if s.errAggregation {
-			s.errsMu.Lock()
-			s.errs = append(s.errs, err)
-			s.errsMu.Unlock()
-		} else {
-			s.errOnce.Do(func() {
-				s.err = err
-			})
-		}
+		s.recordErr(err)
 		if !o.supervisor {
 			s.cancel()
 		}
@@ -209,15 +185,7 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	err := body(s)
 
 	if err != nil {
-		if s.errAggregation {
-			s.errsMu.Lock()
-			s.errs = append(s.errs, err)
-			s.errsMu.Unlock()
-		} else {
-			s.errOnce.Do(func() {
-				s.err = err
-			})
-		}
+		s.recordErr(err)
 		s.cancel()
 	}
 
@@ -232,4 +200,19 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		return errors.Join(s.errs...)
 	}
 	return s.err
+}
+
+// recordErr stores err according to the aggregation policy.
+// In aggregation mode, all errors are collected for errors.Join at the end of Run.
+// Otherwise, only the first error is kept via errOnce.
+func (s *Scope) recordErr(err error) {
+	if s.errAggregation {
+		s.errsMu.Lock()
+		s.errs = append(s.errs, err)
+		s.errsMu.Unlock()
+	} else {
+		s.errOnce.Do(func() {
+			s.err = err
+		})
+	}
 }
