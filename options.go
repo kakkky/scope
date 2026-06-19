@@ -5,7 +5,8 @@ type Option func(*options)
 
 // options holds the configuration applied by Option values.
 type options struct {
-	supervisor bool
+	supervisor     bool
+	errAggregation bool
 }
 
 // WithSupervisor returns an Option that enables supervisor mode for the scope.
@@ -21,5 +22,11 @@ type options struct {
 func WithSupervisor() Option {
 	return func(o *options) {
 		o.supervisor = true
+	}
+}
+
+func WithErrAggregation() Option {
+	return func(o *options) {
+		o.errAggregation = true
 	}
 }

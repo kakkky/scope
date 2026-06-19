@@ -17,6 +17,7 @@ package scope
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -42,6 +43,10 @@ type Scope struct {
 	err     error
 
 	supervisor bool
+
+	errAggregation bool
+	errsMu         sync.Mutex
+	errs           []error
 }
 
 // Run executes body inside a new Scope derived from parent and waits for all
@@ -100,23 +105,36 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 		}()
 		defer func() {
 			if r := recover(); r != nil {
-				s.errOnce.Do(func() {
-					s.err = fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
-					if !s.supervisor {
-						s.cancel()
-					}
-				})
+				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
+				if s.errAggregation {
+					s.errsMu.Lock()
+					s.errs = append(s.errs, err)
+					s.errsMu.Unlock()
+				} else {
+					s.errOnce.Do(func() {
+						s.err = err
+					})
+				}
+				if !s.supervisor {
+					s.cancel()
+				}
 				return
 			}
 		}()
 
 		if err := fn(s.ctx); err != nil {
-			s.errOnce.Do(func() {
-				s.err = err
-				if !s.supervisor {
-					s.cancel()
-				}
-			})
+			if s.errAggregation {
+				s.errsMu.Lock()
+				s.errs = append(s.errs, err)
+				s.errsMu.Unlock()
+			} else {
+				s.errOnce.Do(func() {
+					s.err = err
+				})
+			}
+			if !s.supervisor {
+				s.cancel()
+			}
 		}
 	}()
 }
@@ -157,12 +175,18 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	s.cond.L.Unlock()
 
 	if err := run(s.ctx, body, opts...); err != nil {
-		s.errOnce.Do(func() {
-			s.err = err
-			if !o.supervisor {
-				s.cancel()
-			}
-		})
+		if s.errAggregation {
+			s.errsMu.Lock()
+			s.errs = append(s.errs, err)
+			s.errsMu.Unlock()
+		} else {
+			s.errOnce.Do(func() {
+				s.err = err
+			})
+		}
+		if !o.supervisor {
+			s.cancel()
+		}
 	}
 }
 
@@ -174,20 +198,27 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Scope{
-		ctx:        ctx,
-		cancel:     cancel,
-		cond:       sync.NewCond(&sync.Mutex{}),
-		supervisor: o.supervisor,
+		ctx:            ctx,
+		cancel:         cancel,
+		cond:           sync.NewCond(&sync.Mutex{}),
+		supervisor:     o.supervisor,
+		errAggregation: o.errAggregation,
 	}
 	defer s.cancel()
 
 	err := body(s)
 
 	if err != nil {
-		s.errOnce.Do(func() {
-			s.err = err
-			s.cancel()
-		})
+		if s.errAggregation {
+			s.errsMu.Lock()
+			s.errs = append(s.errs, err)
+			s.errsMu.Unlock()
+		} else {
+			s.errOnce.Do(func() {
+				s.err = err
+			})
+		}
+		s.cancel()
 	}
 
 	s.cond.L.Lock()
@@ -197,5 +228,8 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	s.closed = true
 	s.cond.L.Unlock()
 
+	if s.errAggregation {
+		return errors.Join(s.errs...)
+	}
 	return s.err
 }
