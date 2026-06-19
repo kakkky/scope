@@ -2,6 +2,7 @@ package scope_test
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -250,6 +251,144 @@ func TestRun_Error(t *testing.T) {
 	}
 }
 
+func TestRun_Error_WithErrAggregation(t *testing.T) {
+	t.Parallel()
+
+	var (
+		errA = errors.New("error A")
+		errB = errors.New("error B")
+	)
+
+	tests := []struct {
+		name                    string
+		body                    func(s *scope.Scope) error
+		withAggregationOnRoot   bool // whether to apply WithErrAggregation to the root scope passed to Run
+		wantErrs                []error
+	}{
+		{
+			name: "all goroutine errors are collected",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return errA })
+				s.Go(func(ctx context.Context) error { return errB })
+				return nil
+			},
+			withAggregationOnRoot: true,
+			wantErrs:              []error{errA, errB},
+		},
+		{
+			name: "body error is collected",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return errA })
+				return errB
+			},
+			withAggregationOnRoot: true,
+			wantErrs:              []error{errA, errB},
+		},
+		{
+			name: "goroutine errors in child scope are collected when child also has aggregation",
+			body: func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error { return errA })
+					child.Go(func(ctx context.Context) error { return errB })
+					return nil
+				}, scope.WithErrAggregation())
+				return nil
+			},
+			withAggregationOnRoot: true,
+			wantErrs:              []error{errA, errB},
+		},
+		{
+			name: "errAggregation is not inherited by child scope: only first error propagates",
+			body: func(s *scope.Scope) error {
+				ch := make(chan struct{})
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						close(ch)
+						return errA
+					})
+					child.Go(func(ctx context.Context) error {
+						<-ch
+						return errB
+					})
+					return nil
+				})
+				return nil
+			},
+			withAggregationOnRoot: true,
+			wantErrs:              []error{errA},
+		},
+		{
+			name: "child scope with aggregation collects errors independently of root scope",
+			body: func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error { return errA })
+					child.Go(func(ctx context.Context) error { return errB })
+					return nil
+				}, scope.WithErrAggregation())
+				return nil
+			},
+			withAggregationOnRoot: false,
+			wantErrs:              []error{errA, errB},
+		},
+		{
+			// root uses first-error-wins policy; s.Go fires first, so child's joined error is discarded
+			name: "root records first error only when s.Go fires before child scope",
+			body: func(s *scope.Scope) error {
+				ch := make(chan struct{})
+				s.Go(func(ctx context.Context) error {
+					close(ch)
+					return errA
+				})
+				s.Scope(func(child *scope.Scope) error {
+					<-ch
+					child.Go(func(ctx context.Context) error { return errA })
+					child.Go(func(ctx context.Context) error { return errB })
+					return nil
+				}, scope.WithErrAggregation())
+				return nil
+			},
+			withAggregationOnRoot: false,
+			wantErrs:              []error{errA},
+		},
+		{
+			// root uses first-error-wins policy; child scope fires first, so joined error (errA+errB) is recorded
+			name: "root records joined child error when child scope fires before s.Go",
+			body: func(s *scope.Scope) error {
+				ch := make(chan struct{})
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						close(ch)
+						return errA
+					})
+					child.Go(func(ctx context.Context) error { return errB })
+					return nil
+				}, scope.WithErrAggregation())
+				s.Go(func(ctx context.Context) error {
+					<-ch
+					return errA
+				})
+				return nil
+			},
+			withAggregationOnRoot: false,
+			wantErrs:              []error{errA, errB},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts []scope.Option
+			if tt.withAggregationOnRoot {
+				opts = append(opts, scope.WithErrAggregation())
+			}
+			err := scope.Run(t.Context(), tt.body, opts...)
+			for _, wantErr := range tt.wantErrs {
+				assert.ErrorIs(t, err, wantErr)
+			}
+		})
+	}
+}
+
 func TestRun_Cancel(t *testing.T) {
 	t.Parallel()
 
@@ -435,6 +574,52 @@ func TestRun_WithSupervisor(t *testing.T) {
 		assert.ErrorIs(t, err, assert.AnError)
 		assert.True(t, siblingObserved.Load(), "sibling goroutine within child scope should not have been cancelled")
 		assert.True(t, parentObserved.Load(), "parent goroutine should not have been cancelled")
+	})
+
+	t.Run("with supervisor and aggregation, all goroutine errors are collected", func(t *testing.T) {
+		t.Parallel()
+
+		errA := errors.New("error A")
+		errB := errors.New("error B")
+		ch := make(chan struct{})
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				close(ch)
+				return errA
+			})
+			s.Go(func(ctx context.Context) error {
+				<-ch
+				return errB
+			})
+			return nil
+		}, scope.WithSupervisor(), scope.WithErrAggregation())
+
+		for _, wantErr := range []error{errA, errB} {
+			assert.ErrorIs(t, err, wantErr)
+		}
+	})
+
+	t.Run("nested scopes with supervisor and aggregation collect all errors", func(t *testing.T) {
+		t.Parallel()
+
+		errA := errors.New("error A")
+		errB := errors.New("error B")
+		errC := errors.New("error C")
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error { return errA })
+			s.Scope(func(child *scope.Scope) error {
+				child.Go(func(ctx context.Context) error { return errB })
+				child.Go(func(ctx context.Context) error { return errC })
+				return nil
+			}, scope.WithSupervisor(), scope.WithErrAggregation())
+			return nil
+		}, scope.WithSupervisor(), scope.WithErrAggregation())
+
+		for _, wantErr := range []error{errA, errB, errC} {
+			assert.ErrorIs(t, err, wantErr)
+		}
 	})
 }
 
