@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+
+	"golang.org/x/sync/semaphore"
 )
 
 // Scope represents a structured concurrency scope.
@@ -32,6 +34,8 @@ type Scope struct {
 	errAggregation bool
 	errsMu         sync.Mutex
 	errs           []error
+
+	sem *semaphore.Weighted
 }
 
 // Run executes body inside a new Scope derived from parent and waits for all
@@ -71,6 +75,13 @@ func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 // Calling Go after Run has returned panics. Goroutines must be spawned while
 // Run is executing.
 func (s *Scope) Go(fn func(ctx context.Context) error) {
+	if s.sem != nil {
+		if err := s.sem.Acquire(s.ctx, 1); err != nil {
+			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
+			return
+		}
+	}
+
 	s.cond.L.Lock()
 	if s.closed {
 		s.cond.L.Unlock()
@@ -87,6 +98,11 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 				s.cond.Signal()
 			}
 			s.cond.L.Unlock()
+		}()
+		defer func() {
+			if s.sem != nil {
+				s.sem.Release(1)
+			}
 		}()
 		defer func() {
 			if r := recover(); r != nil {
@@ -166,6 +182,11 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		supervisor:     o.supervisor,
 		errAggregation: o.errAggregation,
 	}
+
+	if o.maxConcurrency > 0 {
+		s.sem = semaphore.NewWeighted(int64(o.maxConcurrency))
+	}
+
 	defer s.cancel(nil)
 
 	err := body(s)

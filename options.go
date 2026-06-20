@@ -7,6 +7,7 @@ type Option func(*options)
 type options struct {
 	supervisor     bool
 	errAggregation bool
+	maxConcurrency int // 0 means no limit
 }
 
 // WithSupervisor returns an Option that enables supervisor mode for the scope.
@@ -19,6 +20,9 @@ type options struct {
 //
 // Goroutines spawned via Go from within another goroutine are registered
 // on the same scope and treated as siblings in terms of context cancellation.
+//
+// This option is not inherited by child scopes created via Scope.Scope;
+// each scope must opt in independently.
 func WithSupervisor() Option {
 	return func(o *options) {
 		o.supervisor = true
@@ -40,5 +44,19 @@ func WithSupervisor() Option {
 func WithErrAggregation() Option {
 	return func(o *options) {
 		o.errAggregation = true
+	}
+}
+
+// WithMaxConcurrency returns an Option that limits the number of goroutines
+// that may execute concurrently within the scope.
+//
+// When the limit is reached, calls to Go block until a running goroutine
+// completes or the scope's context is canceled.
+//
+// This option is not inherited by child scopes created via Scope.Scope;
+// each scope must opt in independently.
+func WithMaxConcurrency(max int) Option {
+	return func(o *options) {
+		o.maxConcurrency = max
 	}
 }
