@@ -157,6 +157,28 @@ func ExampleRun_withSupervisorAndErrAggregation() {
 	// true
 }
 
+// ExampleRun_withMaxConcurrency shows that WithMaxConcurrency limits the number
+// of goroutines executing concurrently within a scope.
+// At most 3 goroutines run at the same time regardless of how many are spawned.
+func ExampleRun_withMaxConcurrency() {
+	var count atomic.Int64
+
+	scope.Run(context.Background(), func(s *scope.Scope) error {
+		for range 10 {
+			s.Go(func(ctx context.Context) error {
+				count.Add(1)
+				return nil
+			})
+		}
+		return nil
+	}, scope.WithMaxConcurrency(3))
+
+	fmt.Println("all tasks completed:", count.Load() == 10)
+
+	// Output:
+	// all tasks completed: true
+}
+
 // ExampleScope_Go_dynamicSpawn shows that goroutines can be spawned dynamically
 // from within other goroutines, as long as Run has not yet returned.
 func ExampleScope_Go_dynamicSpawn() {
@@ -298,6 +320,38 @@ func ExampleScope_Scope_errorOccuredFromGoWithSupervisor() {
 	// sibling ctx cancelled: false
 	// parent level goroutine ctx cancelled: false
 	// err: task failed
+}
+
+// ExampleScope_Scope_withMaxConcurrency shows that WithMaxConcurrency is
+// independent per scope and is not inherited by child scopes.
+func ExampleScope_Scope_withMaxConcurrency() {
+	var rootCount, childCount atomic.Int64
+
+	scope.Run(context.Background(), func(s *scope.Scope) error {
+		for range 5 {
+			s.Go(func(ctx context.Context) error {
+				rootCount.Add(1)
+				return nil
+			})
+		}
+		s.Scope(func(child *scope.Scope) error {
+			for range 5 {
+				child.Go(func(ctx context.Context) error {
+					childCount.Add(1)
+					return nil
+				})
+			}
+			return nil
+		}, scope.WithMaxConcurrency(2))
+		return nil
+	}, scope.WithMaxConcurrency(3))
+
+	fmt.Println("root tasks completed:", rootCount.Load() == 5)
+	fmt.Println("child tasks completed:", childCount.Load() == 5)
+
+	// Output:
+	// root tasks completed: true
+	// child tasks completed: true
 }
 
 // ExampleScope_Scope_errAggregationParentAndChild shows that each scope

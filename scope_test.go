@@ -3,8 +3,11 @@ package scope_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/kakkky/scope"
 	"github.com/stretchr/testify/assert"
@@ -761,4 +764,155 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestRun_WithMaxConcurrency(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		rootMax     int
+		body        func(s *scope.Scope, trackFn func(ctx context.Context) error) error
+		wantPeakMax int
+	}{
+		{
+			name:    "Run only: peak does not exceed max",
+			rootMax: 3,
+			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
+				for range 10 {
+					s.Go(trackFn)
+				}
+				return nil
+			},
+			wantPeakMax: 3,
+		},
+		{
+			name:    "child scope only has max: peak in child does not exceed max",
+			rootMax: 0,
+			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
+				s.Scope(func(child *scope.Scope) error {
+					for range 10 {
+						child.Go(trackFn)
+					}
+					return nil
+				}, scope.WithMaxConcurrency(2))
+				return nil
+			},
+			wantPeakMax: 2,
+		},
+		{
+			name:    "root scope only has max: root max does not apply to child",
+			rootMax: 3,
+			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
+				s.Scope(func(child *scope.Scope) error {
+					for range 10 {
+						child.Go(trackFn)
+					}
+					return nil
+				})
+				return nil
+			},
+			wantPeakMax: 10, // child has no max, root max does not apply to child
+		},
+		{
+			name:    "both root and child have max: each peak does not exceed its own max",
+			rootMax: 3,
+			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
+				s.Scope(func(child *scope.Scope) error {
+					for range 10 {
+						child.Go(trackFn)
+					}
+					return nil
+				}, scope.WithMaxConcurrency(2))
+				return nil
+			},
+			wantPeakMax: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var mu sync.Mutex
+				var current, peak int
+
+				trackFn := func(ctx context.Context) error {
+					mu.Lock()
+					current++
+					if current > peak {
+						peak = current
+					}
+					mu.Unlock()
+
+					time.Sleep(3 * time.Second)
+
+					mu.Lock()
+					current--
+					mu.Unlock()
+					return nil
+				}
+
+				var opts []scope.Option
+				if tt.rootMax > 0 {
+					opts = append(opts, scope.WithMaxConcurrency(tt.rootMax))
+				}
+
+				err := scope.Run(context.Background(), func(s *scope.Scope) error {
+					return tt.body(s, trackFn)
+				}, opts...)
+
+				assert.NoError(t, err)
+				assert.LessOrEqual(t, peak, tt.wantPeakMax)
+			})
+		})
+	}
+
+	t.Run("semaphore is released on panic so next goroutine can proceed", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			var reached atomic.Bool
+
+			err := scope.Run(context.Background(), func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					panic("boom")
+				})
+				s.Go(func(ctx context.Context) error {
+					reached.Store(true)
+					return nil
+				})
+				return nil
+			}, scope.WithMaxConcurrency(1), scope.WithSupervisor())
+
+			assert.Error(t, err)
+			assert.True(t, reached.Load(), "second goroutine should have acquired semaphore after panic released it")
+		})
+	})
+
+	t.Run("goroutine waiting on semaphore exits cleanly on ctx cancellation", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			var goroutine2Ran atomic.Bool
+
+			err := scope.Run(context.Background(), func(s *scope.Scope) error {
+				// first goroutine holds the slot and returns an error to cancel ctx
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(1 * time.Second)
+					return assert.AnError
+				})
+				// second goroutine blocks on semaphore; Acquire should fail on ctx cancellation
+				s.Go(func(ctx context.Context) error {
+					goroutine2Ran.Store(true)
+					return nil
+				})
+				return nil
+			}, scope.WithMaxConcurrency(1))
+
+			assert.ErrorIs(t, err, assert.AnError)
+			assert.False(t, goroutine2Ran.Load(), "goroutine2 should not have run: Acquire should have failed on ctx cancellation")
+		})
+	})
 }
