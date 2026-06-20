@@ -1,18 +1,3 @@
-// Package scope provides scope-bound structured concurrency primitives for Go.
-//
-// A Scope binds the lifetime of spawned goroutines to a lexical block, so that
-// the goroutines are guaranteed to complete before the block exits. This avoids
-// goroutine leaks caused by missing wg.Wait() calls, unobserved panics, and
-// errors that escape unhandled.
-//
-// The primary entry point is Run, which establishes a scope and invokes a body
-// function. Inside the body, goroutines are spawned via Scope.Go. Run does not
-// return until every spawned goroutine has finished.
-//
-// Errors and panics from any spawned goroutine are propagated back to the
-// caller of Run. The first non-nil error cancels the scope's context, which is
-// passed to every spawned goroutine and should be observed by callers for
-// cooperative cancellation.
 package scope
 
 import (
@@ -33,7 +18,7 @@ import (
 // The zero value of Scope is not usable.
 type Scope struct {
 	ctx    context.Context
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 
 	cond    *sync.Cond
 	activeG int
@@ -108,7 +93,7 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
 				s.recordErr(err)
 				if !s.supervisor {
-					s.cancel()
+					s.cancel(err)
 				}
 				return
 			}
@@ -117,7 +102,7 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 		if err := fn(s.ctx); err != nil {
 			s.recordErr(err)
 			if !s.supervisor {
-				s.cancel()
+				s.cancel(err)
 			}
 		}
 	}()
@@ -161,7 +146,7 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	if err := run(s.ctx, body, opts...); err != nil {
 		s.recordErr(err)
 		if !o.supervisor {
-			s.cancel()
+			s.cancel(err)
 		}
 	}
 }
@@ -173,7 +158,7 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		opt(o)
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	s := &Scope{
 		ctx:            ctx,
 		cancel:         cancel,
@@ -181,13 +166,13 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		supervisor:     o.supervisor,
 		errAggregation: o.errAggregation,
 	}
-	defer s.cancel()
+	defer s.cancel(nil)
 
 	err := body(s)
 
 	if err != nil {
 		s.recordErr(err)
-		s.cancel()
+		s.cancel(err)
 	}
 
 	s.cond.L.Lock()
