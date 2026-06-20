@@ -59,6 +59,25 @@ func ExampleRun_errorCancelsContext() {
 	// err: task A failed
 }
 
+// ExampleRun_contextCause shows that context.Cause returns the error that
+// triggered cancellation, rather than the generic context.Canceled.
+func ExampleRun_contextCause() {
+	scope.Run(context.Background(), func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error {
+			return errors.New("task A failed")
+		})
+		s.Go(func(ctx context.Context) error {
+			<-ctx.Done()
+			fmt.Println("cause:", context.Cause(ctx))
+			return ctx.Err()
+		})
+		return nil
+	})
+
+	// Output:
+	// cause: task A failed
+}
+
 // ExampleRun_panicRecovery shows that a panic inside a spawned goroutine is
 // recovered and surfaced as an error rather than crashing the process.
 func ExampleRun_panicRecovery() {

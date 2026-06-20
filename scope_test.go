@@ -620,6 +620,108 @@ func TestRun_WithSupervisor(t *testing.T) {
 	})
 }
 
+func TestRun_CancellationCause(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		body      func(s *scope.Scope, cause *error) error
+		opts      []scope.Option
+		wantCause string
+	}{
+		{
+			name: "goroutine error sets cause",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Go(func(ctx context.Context) error {
+					return assert.AnError
+				})
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					*cause = context.Cause(ctx)
+					return ctx.Err()
+				})
+				return nil
+			},
+			wantCause: assert.AnError.Error(),
+		},
+		{
+			name: "body error sets cause",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					*cause = context.Cause(ctx)
+					return ctx.Err()
+				})
+				return assert.AnError
+			},
+			wantCause: assert.AnError.Error(),
+		},
+		{
+			name: "normal completion leaves cause nil",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Go(func(ctx context.Context) error {
+					*cause = context.Cause(ctx)
+					return nil
+				})
+				return nil
+			},
+			wantCause: "",
+		},
+		{
+			name: "supervisor: context not canceled so cause is nil",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Go(func(ctx context.Context) error {
+					return assert.AnError
+				})
+				s.Go(func(ctx context.Context) error {
+					*cause = context.Cause(ctx)
+					return nil
+				})
+				return nil
+			},
+			opts:      []scope.Option{scope.WithSupervisor()},
+			wantCause: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var cause error
+			scope.Run(t.Context(), func(s *scope.Scope) error {
+				return tt.body(s, &cause)
+			}, tt.opts...)
+
+			got := ""
+			if cause != nil {
+				got = cause.Error()
+			}
+			assert.Equal(t, tt.wantCause, got)
+		})
+	}
+
+	t.Run("panic sets cause", func(t *testing.T) {
+		t.Parallel()
+
+		var cause error
+		scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				panic("boom")
+			})
+			s.Go(func(ctx context.Context) error {
+				<-ctx.Done()
+				cause = context.Cause(ctx)
+				return ctx.Err()
+			})
+			return nil
+		})
+
+		require.NotNil(t, cause)
+		assert.Contains(t, cause.Error(), "boom")
+	})
+}
+
 func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 	t.Parallel()
 
