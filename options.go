@@ -1,5 +1,7 @@
 package scope
 
+import "time"
+
 // Option configures a Scope created by Run or Scope.Scope.
 type Option func(*options)
 
@@ -8,6 +10,7 @@ type options struct {
 	supervisor     bool
 	errAggregation bool
 	maxConcurrency int // 0 means no limit
+	timeout        time.Duration
 }
 
 // WithSupervisor returns an Option that enables supervisor mode for the scope.
@@ -58,5 +61,26 @@ func WithErrAggregation() Option {
 func WithMaxConcurrency(max int) Option {
 	return func(o *options) {
 		o.maxConcurrency = max
+	}
+}
+
+// WithTimeout returns an Option that cancels the scope's context after duration d,
+// causing all goroutines in the scope to observe ctx.Done().
+//
+// When the timeout fires, Run returns context.DeadlineExceeded. The deadline is
+// visible via ctx.Deadline() within the scope's goroutines, allowing downstream
+// context-aware operations (e.g. HTTP clients) to observe the remaining time.
+//
+// If an earlier deadline is already set on the context, that deadline takes
+// precedence and this timeout has no additional effect.
+//
+// A timeout always cancels the scope's context regardless of WithSupervisor.
+//
+// The timeout setting itself is not inherited by child scopes created via Scope.Scope;
+// each scope must opt in independently. Cancellation, however, propagates to child
+// scopes as with any context cancellation.
+func WithTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.timeout = d
 	}
 }

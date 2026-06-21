@@ -174,7 +174,14 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		opt(o)
 	}
 
+	if o.timeout > 0 {
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
+		defer timeoutCancel()
+	}
+
 	ctx, cancel := context.WithCancelCause(ctx)
+
 	s := &Scope{
 		ctx:            ctx,
 		cancel:         cancel,
@@ -202,6 +209,15 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	}
 	s.closed = true
 	s.cond.L.Unlock()
+
+	if o.timeout > 0 {
+		if cause := context.Cause(s.ctx); cause == context.DeadlineExceeded {
+			if s.errAggregation {
+				return errors.Join(append(s.errs, cause)...)
+			}
+			return cause
+		}
+	}
 
 	if s.errAggregation {
 		return errors.Join(s.errs...)

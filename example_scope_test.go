@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/kakkky/scope"
 )
@@ -177,6 +178,23 @@ func ExampleRun_withMaxConcurrency() {
 
 	// Output:
 	// all tasks completed: true
+}
+
+// ExampleRun_withTimeout shows that WithTimeout cancels the scope's context
+// after the given duration, causing all goroutines to observe ctx.Done().
+func ExampleRun_withTimeout() {
+	err := scope.Run(context.Background(), func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		return nil
+	}, scope.WithTimeout(10*time.Millisecond))
+
+	fmt.Println(errors.Is(err, context.DeadlineExceeded))
+
+	// Output:
+	// true
 }
 
 // ExampleScope_Go_dynamicSpawn shows that goroutines can be spawned dynamically
@@ -352,6 +370,27 @@ func ExampleScope_Scope_withMaxConcurrency() {
 	// Output:
 	// root tasks completed: true
 	// child tasks completed: true
+}
+
+// ExampleScope_Scope_withTimeout shows that a child scope can have its own
+// timeout independent of the parent. When the child times out, the error
+// propagates to the parent scope.
+func ExampleScope_Scope_withTimeout() {
+	err := scope.Run(context.Background(), func(s *scope.Scope) error {
+		s.Scope(func(child *scope.Scope) error {
+			child.Go(func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			})
+			return nil
+		}, scope.WithTimeout(10*time.Millisecond))
+		return nil
+	})
+
+	fmt.Println(errors.Is(err, context.DeadlineExceeded))
+
+	// Output:
+	// true
 }
 
 // ExampleScope_Scope_errAggregationParentAndChild shows that each scope
