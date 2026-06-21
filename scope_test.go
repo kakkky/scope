@@ -1042,10 +1042,13 @@ func TestRun_WithTimeout(t *testing.T) {
 			withTimeoutOnRoot: true,
 			rootTimeout:       1 * time.Second,
 			body: func(s *scope.Scope) error {
+				ch := make(chan struct{})
 				s.Go(func(ctx context.Context) error {
+					close(ch)
 					return assert.AnError
 				})
 				s.Go(func(ctx context.Context) error {
+					<-ch
 					time.Sleep(3 * time.Second)
 					return nil
 				})
