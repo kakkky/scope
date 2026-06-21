@@ -174,14 +174,29 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		opt(o)
 	}
 
-	ctx, cancel := context.WithCancelCause(ctx)
 	s := &Scope{
-		ctx:            ctx,
-		cancel:         cancel,
 		cond:           sync.NewCond(&sync.Mutex{}),
 		supervisor:     o.supervisor,
 		errAggregation: o.errAggregation,
 	}
+
+	if o.timeout > 0 {
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
+		defer timeoutCancel()
+
+		stop := context.AfterFunc(ctx, func() {
+			if err := ctx.Err(); err == context.DeadlineExceeded {
+				s.recordErr(err)
+			}
+		})
+		defer stop()
+	}
+
+	ctx, cancel := context.WithCancelCause(ctx)
+
+	s.ctx = ctx
+	s.cancel = cancel
 
 	if o.maxConcurrency > 0 {
 		s.sem = semaphore.NewWeighted(int64(o.maxConcurrency))
