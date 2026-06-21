@@ -71,17 +71,14 @@ func WithMaxConcurrency(max int) Option {
 // visible via ctx.Deadline() within the scope's goroutines, allowing downstream
 // context-aware operations (e.g. HTTP clients) to observe the remaining time.
 //
-// Cancellation propagates to child scopes as with any context cancellation, but
-// the timeout itself is not inherited: child scopes do not acquire their own
-// timer unless WithTimeout is applied to them explicitly.
-//
-// If the parent context already carries an earlier deadline, that deadline takes
+// If an earlier deadline is already set on the context, that deadline takes
 // precedence and this timeout has no additional effect.
 //
 // A timeout always cancels the scope's context regardless of WithSupervisor.
 //
-// This option is not inherited by child scopes created via Scope.Scope;
-// each scope must opt in independently.
+// The timeout setting itself is not inherited by child scopes created via Scope.Scope;
+// each scope must opt in independently. Cancellation, however, propagates to child
+// scopes as with any context cancellation.
 func WithTimeout(d time.Duration) Option {
 	return func(o *options) {
 		o.timeout = d
