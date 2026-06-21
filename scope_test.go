@@ -1037,6 +1037,22 @@ func TestRun_WithTimeout(t *testing.T) {
 			},
 			wantErr: context.DeadlineExceeded,
 		},
+		{
+			name:              "goroutine error fires before timeout: goroutine error takes priority",
+			withTimeoutOnRoot: true,
+			rootTimeout:       1 * time.Second,
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					return assert.AnError
+				})
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(3 * time.Second)
+					return nil
+				})
+				return nil
+			},
+			wantErr: assert.AnError,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1059,4 +1075,24 @@ func TestRun_WithTimeout(t *testing.T) {
 			})
 		})
 	}
+
+	t.Run("timeout fires with errAggregation: DeadlineExceeded and goroutine errors are aggregated", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			err := scope.Run(context.Background(), func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					return assert.AnError
+				})
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(3 * time.Second)
+					return nil
+				})
+				return nil
+			}, scope.WithTimeout(1*time.Second), scope.WithSupervisor(), scope.WithErrAggregation())
+
+			assert.ErrorIs(t, err, assert.AnError)
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+		})
+	})
 }
