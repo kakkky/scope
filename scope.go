@@ -184,13 +184,6 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		var timeoutCancel context.CancelFunc
 		ctx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
 		defer timeoutCancel()
-
-		stop := context.AfterFunc(ctx, func() {
-			if err := ctx.Err(); err == context.DeadlineExceeded {
-				s.recordErr(err)
-			}
-		})
-		defer stop()
 	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -217,6 +210,17 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	}
 	s.closed = true
 	s.cond.L.Unlock()
+
+	// Timeout fires by cancelling the context rather than recording an error directly;
+	// check context.Cause here to surface DeadlineExceeded as the return value.
+	if o.timeout > 0 {
+		if cause := context.Cause(s.ctx); cause == context.DeadlineExceeded {
+			if s.errAggregation {
+				return errors.Join(append(s.errs, cause)...)
+			}
+			return cause
+		}
+	}
 
 	if s.errAggregation {
 		return errors.Join(s.errs...)
