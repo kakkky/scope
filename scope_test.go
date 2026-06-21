@@ -916,3 +916,147 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 		})
 	})
 }
+
+func TestRun_WithTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		body              func(s *scope.Scope) error
+		withTimeoutOnRoot bool
+		rootTimeout       time.Duration
+		wantErr           error
+	}{
+		{
+			name:              "root timeout fire: Run returns context.DeadlineExceeded",
+			withTimeoutOnRoot: true,
+			rootTimeout:       1 * time.Second,
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(3 * time.Second)
+					return nil
+				})
+				return nil
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name:              "root timeout does not fire: Run returns nil",
+			withTimeoutOnRoot: true,
+			rootTimeout:       5 * time.Second,
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(1 * time.Second)
+					return nil
+				})
+				return nil
+			},
+			wantErr: nil,
+		},
+		{
+			name:              "child only timeout fires: error propagates to parent",
+			withTimeoutOnRoot: false,
+			body: func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						time.Sleep(3 * time.Second)
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(1*time.Second))
+				return nil
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name:              "timeout cancels all goroutines in scope",
+			withTimeoutOnRoot: true,
+			rootTimeout:       1 * time.Second,
+			body: func(s *scope.Scope) error {
+				for range 3 {
+					s.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						return ctx.Err()
+					})
+				}
+				return nil
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name:              "parent timeout < child timeout: parent fires first",
+			withTimeoutOnRoot: true,
+			rootTimeout:       1 * time.Second,
+			body: func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						time.Sleep(3 * time.Second)
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(5*time.Second))
+				return nil
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name:              "parent timeout > child timeout: child fires first",
+			withTimeoutOnRoot: true,
+			rootTimeout:       5 * time.Second,
+			body: func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						time.Sleep(3 * time.Second)
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(1*time.Second))
+				return nil
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name:              "sibling timeout A < B: A fires first, B observes cancel",
+			withTimeoutOnRoot: false,
+			body: func(s *scope.Scope) error {
+				s.Scope(func(a *scope.Scope) error {
+					a.Go(func(ctx context.Context) error {
+						time.Sleep(3 * time.Second)
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(1*time.Second))
+				s.Scope(func(b *scope.Scope) error {
+					b.Go(func(ctx context.Context) error {
+						assert.ErrorIs(t, ctx.Err(), context.Canceled)
+						return ctx.Err()
+					})
+					return nil
+				})
+				return nil
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var opts []scope.Option
+				if tt.withTimeoutOnRoot {
+					opts = append(opts, scope.WithTimeout(tt.rootTimeout))
+				}
+
+				err := scope.Run(t.Context(), tt.body, opts...)
+
+				if tt.wantErr != nil {
+					assert.ErrorIs(t, err, tt.wantErr)
+				} else {
+					assert.NoError(t, err)
+				}
+			})
+		})
+	}
+}
