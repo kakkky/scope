@@ -124,6 +124,65 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 	}()
 }
 
+func GoResult[T any](s *Scope, fn func(ctx context.Context) (T, error)) Result[T] {
+	if s.sem != nil {
+		if err := s.sem.Acquire(s.ctx, 1); err != nil {
+			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
+			return Result[T]{}
+		}
+	}
+
+	s.cond.L.Lock()
+	if s.closed {
+		s.cond.L.Unlock()
+		panic("scope: misuse: Go called outside scope lifetime")
+	}
+	s.activeG++
+	s.cond.L.Unlock()
+
+	result := newResult[T]()
+
+	go func() {
+		defer func() {
+			s.cond.L.Lock()
+			s.activeG--
+			if s.activeG == 0 {
+				s.cond.Signal()
+			}
+			s.cond.L.Unlock()
+		}()
+		defer func() {
+			if s.sem != nil {
+				s.sem.Release(1)
+			}
+		}()
+		defer func() {
+			if r := recover(); r != nil {
+				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
+				s.recordErr(err)
+				if !s.supervisor {
+					s.cancel(err)
+				}
+				return
+			}
+		}()
+
+		v, err := fn(s.ctx)
+
+		if err != nil {
+			s.recordErr(err)
+			if !s.supervisor {
+				s.cancel(err)
+			}
+			return
+		}
+
+		result.set(v)
+	}()
+
+	return result
+}
+
 // Scope creates a child scope nested under s and runs body within it.
 //
 // Scope is synchronous: it does not return until body has returned and every
