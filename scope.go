@@ -75,111 +75,19 @@ func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 // Calling Go after Run has returned panics. Goroutines must be spawned while
 // Run is executing.
 func (s *Scope) Go(fn func(ctx context.Context) error) {
-	if s.sem != nil {
-		if err := s.sem.Acquire(s.ctx, 1); err != nil {
-			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
-			return
-		}
-	}
-
-	s.cond.L.Lock()
-	if s.closed {
-		s.cond.L.Unlock()
-		panic("scope: misuse: Go called outside scope lifetime")
-	}
-	s.activeG++
-	s.cond.L.Unlock()
-
-	go func() {
-		defer func() {
-			s.cond.L.Lock()
-			s.activeG--
-			if s.activeG == 0 {
-				s.cond.Signal()
-			}
-			s.cond.L.Unlock()
-		}()
-		defer func() {
-			if s.sem != nil {
-				s.sem.Release(1)
-			}
-		}()
-		defer func() {
-			if r := recover(); r != nil {
-				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
-				s.recordErr(err)
-				if !s.supervisor {
-					s.cancel(err)
-				}
-				return
-			}
-		}()
-
-		if err := fn(s.ctx); err != nil {
-			s.recordErr(err)
-			if !s.supervisor {
-				s.cancel(err)
-			}
-		}
-	}()
+	s.spawnGoroutine(fn)
 }
 
 func GoResult[T any](s *Scope, fn func(ctx context.Context) (T, error)) Result[T] {
-	if s.sem != nil {
-		if err := s.sem.Acquire(s.ctx, 1); err != nil {
-			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
-			return Result[T]{}
-		}
-	}
-
-	s.cond.L.Lock()
-	if s.closed {
-		s.cond.L.Unlock()
-		panic("scope: misuse: Go called outside scope lifetime")
-	}
-	s.activeG++
-	s.cond.L.Unlock()
-
 	result := newResult[T]()
-
-	go func() {
-		defer func() {
-			s.cond.L.Lock()
-			s.activeG--
-			if s.activeG == 0 {
-				s.cond.Signal()
-			}
-			s.cond.L.Unlock()
-		}()
-		defer func() {
-			if s.sem != nil {
-				s.sem.Release(1)
-			}
-		}()
-		defer func() {
-			if r := recover(); r != nil {
-				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
-				s.recordErr(err)
-				if !s.supervisor {
-					s.cancel(err)
-				}
-				return
-			}
-		}()
-
-		v, err := fn(s.ctx)
-
+	s.spawnGoroutine(func(ctx context.Context) error {
+		v, err := fn(ctx)
 		if err != nil {
-			s.recordErr(err)
-			if !s.supervisor {
-				s.cancel(err)
-			}
-			return
+			return err
 		}
-
 		result.set(v)
-	}()
-
+		return nil
+	})
 	return result
 }
 
@@ -282,6 +190,56 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		return errors.Join(s.errs...)
 	}
 	return s.err
+}
+
+func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
+	if s.sem != nil {
+		if err := s.sem.Acquire(s.ctx, 1); err != nil {
+			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
+			return
+		}
+	}
+
+	s.cond.L.Lock()
+	if s.closed {
+		s.cond.L.Unlock()
+		panic("scope: misuse: Go called outside scope lifetime")
+	}
+	s.activeG++
+	s.cond.L.Unlock()
+
+	go func() {
+		defer func() {
+			s.cond.L.Lock()
+			s.activeG--
+			if s.activeG == 0 {
+				s.cond.Signal()
+			}
+			s.cond.L.Unlock()
+		}()
+		defer func() {
+			if s.sem != nil {
+				s.sem.Release(1)
+			}
+		}()
+		defer func() {
+			if r := recover(); r != nil {
+				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
+				s.recordErr(err)
+				if !s.supervisor {
+					s.cancel(err)
+				}
+				return
+			}
+		}()
+
+		if err := fn(s.ctx); err != nil {
+			s.recordErr(err)
+			if !s.supervisor {
+				s.cancel(err)
+			}
+		}
+	}()
 }
 
 // recordErr stores err according to the aggregation policy.
