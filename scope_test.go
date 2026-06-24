@@ -140,6 +140,101 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 2,
 		},
+		// GoFuture
+		{
+			name: "GoFuture: returns value produced by goroutine",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				var want = "test"
+				f := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					count.Add(1)
+					return want, nil
+				})
+				got, err := f.Wait()
+				assert.Equal(t, want, got)
+				return err
+			},
+			wantCount: 1,
+		},
+		{
+			name: "GoFuture: two futures run concurrently and both return correct values",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				var want1 = "test"
+				var want2 = "test"
+				f1 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					count.Add(1)
+					return want1, nil
+				})
+				f2 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					count.Add(1)
+					return want2, nil
+				})
+				got1, err := f1.Wait()
+				assert.Equal(t, want1, got1)
+				if err != nil {
+					return err
+				}
+
+				got2, err := f2.Wait()
+				assert.Equal(t, want2, got2)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+			wantCount: 2,
+		},
+		{
+			name: "GoFuture: dag: second future uses result of first future",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				f1 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					count.Add(1)
+					return 1, nil
+				})
+				f2 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					got1, err := f1.Wait()
+					if err != nil {
+						return 0, err
+					}
+					count.Add(1)
+					return 1 + got1, nil
+				})
+				got2, err := f2.Wait()
+				assert.Equal(t, got2, 2)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+			wantCount: 2,
+		},
+		{
+			name: "GoFuture: future not waited does not cause leak or deadlock",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				_ = scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					count.Add(1)
+					return "test", nil
+				})
+				return nil
+			},
+			wantCount: 1,
+		},
+		{
+			name: "GoFuture: Wait called inside s.Go goroutine",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				f := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					count.Add(1)
+					return 42, nil
+				})
+				s.Go(func(ctx context.Context) error {
+					count.Add(1)
+					got, err := f.Wait()
+					assert.Equal(t, 42, got)
+					return err
+				})
+				return nil
+			},
+			wantCount: 2,
+		},
 	}
 
 	for _, tt := range tests {
@@ -158,17 +253,24 @@ func TestRun(t *testing.T) {
 func TestRun_Error(t *testing.T) {
 	t.Parallel()
 
+	var (
+		errA = errors.New("error A")
+		errB = errors.New("error B")
+		errC = errors.New("error C")
+	)
+
 	tests := []struct {
-		name    string
-		body    func(s *scope.Scope) error
-		wantErr error
+		name     string
+		body     func(s *scope.Scope) error
+		opts     []scope.Option
+		wantErrs []error
 	}{
 		{
 			name: "body returns error",
 			body: func(s *scope.Scope) error {
 				return assert.AnError
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
 		{
 			name: "body spawns goroutine that returns error",
@@ -178,7 +280,7 @@ func TestRun_Error(t *testing.T) {
 				})
 				return nil
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
 		{
 			name: "body spawns goroutines that return error, but only first error is returned",
@@ -192,7 +294,7 @@ func TestRun_Error(t *testing.T) {
 				})
 				return nil
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
 		{
 			name: "grandchild error propagates",
@@ -205,7 +307,7 @@ func TestRun_Error(t *testing.T) {
 				})
 				return nil
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
 		{
 			name: "successful children do not interfere with error propagation",
@@ -218,7 +320,7 @@ func TestRun_Error(t *testing.T) {
 				})
 				return nil
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
 		{
 			name: "error in child scope body propagates",
@@ -228,7 +330,7 @@ func TestRun_Error(t *testing.T) {
 				})
 				return nil
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
 		{
 			name: "error in child scope goroutine propagates",
@@ -241,7 +343,7 @@ func TestRun_Error(t *testing.T) {
 				})
 				return nil
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
 		{
 			name: "GoFuture fn returns error: error propagates and Wait unblocks",
@@ -253,54 +355,30 @@ func TestRun_Error(t *testing.T) {
 				assert.ErrorIs(t, err, context.Canceled)
 				return nil
 			},
-			wantErr: assert.AnError,
+			wantErrs: []error{assert.AnError},
 		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := scope.Run(t.Context(), tt.body)
-			assert.ErrorIs(t, err, tt.wantErr)
-		})
-	}
-}
-
-func TestRun_Error_WithErrAggregation(t *testing.T) {
-	t.Parallel()
-
-	var (
-		errA = errors.New("error A")
-		errB = errors.New("error B")
-	)
-
-	tests := []struct {
-		name                  string
-		body                  func(s *scope.Scope) error
-		withAggregationOnRoot bool // whether to apply WithErrAggregation to the root scope passed to Run
-		wantErrs              []error
-	}{
+		// WithErrAggregation
 		{
-			name: "all goroutine errors are collected",
+			name: "WithErrAggregation: all goroutine errors are collected",
 			body: func(s *scope.Scope) error {
 				s.Go(func(ctx context.Context) error { return errA })
 				s.Go(func(ctx context.Context) error { return errB })
 				return nil
 			},
-			withAggregationOnRoot: true,
-			wantErrs:              []error{errA, errB},
+			opts:     []scope.Option{scope.WithErrAggregation()},
+			wantErrs: []error{errA, errB},
 		},
 		{
-			name: "body error is collected",
+			name: "WithErrAggregation: body error is collected",
 			body: func(s *scope.Scope) error {
 				s.Go(func(ctx context.Context) error { return errA })
 				return errB
 			},
-			withAggregationOnRoot: true,
-			wantErrs:              []error{errA, errB},
+			opts:     []scope.Option{scope.WithErrAggregation()},
+			wantErrs: []error{errA, errB},
 		},
 		{
-			name: "goroutine errors in child scope are collected when child also has aggregation",
+			name: "WithErrAggregation: goroutine errors in child scope are collected when child also has aggregation",
 			body: func(s *scope.Scope) error {
 				s.Scope(func(child *scope.Scope) error {
 					child.Go(func(ctx context.Context) error { return errA })
@@ -309,11 +387,11 @@ func TestRun_Error_WithErrAggregation(t *testing.T) {
 				}, scope.WithErrAggregation())
 				return nil
 			},
-			withAggregationOnRoot: true,
-			wantErrs:              []error{errA, errB},
+			opts:     []scope.Option{scope.WithErrAggregation()},
+			wantErrs: []error{errA, errB},
 		},
 		{
-			name: "child scope with aggregation collects errors independently of root scope",
+			name: "WithErrAggregation: child scope collects errors independently of root",
 			body: func(s *scope.Scope) error {
 				s.Scope(func(child *scope.Scope) error {
 					child.Go(func(ctx context.Context) error { return errA })
@@ -322,12 +400,11 @@ func TestRun_Error_WithErrAggregation(t *testing.T) {
 				}, scope.WithErrAggregation())
 				return nil
 			},
-			withAggregationOnRoot: false,
-			wantErrs:              []error{errA, errB},
+			wantErrs: []error{errA, errB},
 		},
 		{
 			// root uses first-error-wins policy; s.Go fires first, so child's joined error is discarded
-			name: "root records first error only when s.Go fires before child scope",
+			name: "WithErrAggregation: root records first error only when s.Go fires before child scope",
 			body: func(s *scope.Scope) error {
 				ch := make(chan struct{})
 				s.Go(func(ctx context.Context) error {
@@ -342,12 +419,11 @@ func TestRun_Error_WithErrAggregation(t *testing.T) {
 				}, scope.WithErrAggregation())
 				return nil
 			},
-			withAggregationOnRoot: false,
-			wantErrs:              []error{errA},
+			wantErrs: []error{errA},
 		},
 		{
 			// root uses first-error-wins policy; child scope fires first, so joined error (errA+errB) is recorded
-			name: "root records joined child error when child scope fires before s.Go",
+			name: "WithErrAggregation: root records joined child error when child scope fires before s.Go",
 			body: func(s *scope.Scope) error {
 				ch := make(chan struct{})
 				s.Scope(func(child *scope.Scope) error {
@@ -364,26 +440,53 @@ func TestRun_Error_WithErrAggregation(t *testing.T) {
 				})
 				return nil
 			},
-			withAggregationOnRoot: false,
-			wantErrs:              []error{errA, errB},
+			wantErrs: []error{errA, errB},
+		},
+		// WithSupervisor + WithErrAggregation
+		{
+			name: "WithSupervisor+WithErrAggregation: all goroutine errors are collected",
+			body: func(s *scope.Scope) error {
+				ch := make(chan struct{})
+				s.Go(func(ctx context.Context) error {
+					close(ch)
+					return errA
+				})
+				s.Go(func(ctx context.Context) error {
+					<-ch
+					return errB
+				})
+				return nil
+			},
+			opts:     []scope.Option{scope.WithSupervisor(), scope.WithErrAggregation()},
+			wantErrs: []error{errA, errB},
+		},
+		{
+			name: "WithSupervisor+WithErrAggregation: nested scopes collect all errors",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return errA })
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error { return errB })
+					child.Go(func(ctx context.Context) error { return errC })
+					return nil
+				}, scope.WithSupervisor(), scope.WithErrAggregation())
+				return nil
+			},
+			opts:     []scope.Option{scope.WithSupervisor(), scope.WithErrAggregation()},
+			wantErrs: []error{errA, errB, errC},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			var opts []scope.Option
-			if tt.withAggregationOnRoot {
-				opts = append(opts, scope.WithErrAggregation())
-			}
-			err := scope.Run(t.Context(), tt.body, opts...)
+			err := scope.Run(t.Context(), tt.body, tt.opts...)
 			for _, wantErr := range tt.wantErrs {
 				assert.ErrorIs(t, err, wantErr)
 			}
 		})
 	}
 
-	t.Run("errAggregation is not inherited by child scope: only first error propagates", func(t *testing.T) {
+	t.Run("WithErrAggregation is not inherited by child scope: only first error propagates", func(t *testing.T) {
 		t.Parallel()
 
 		err := scope.Run(t.Context(), func(s *scope.Scope) error {
@@ -485,154 +588,6 @@ func TestRun_PanicInGo(t *testing.T) {
 	assert.Contains(t, err.Error(), "goroutine", "stack trace should be in error message")
 	assert.True(t, observed.Load(), "sibling did not observe cancel after panic")
 
-}
-
-func TestRun_WithSupervisor(t *testing.T) {
-	t.Parallel()
-
-	t.Run("goroutine error does not cancel sibling goroutines", func(t *testing.T) {
-		t.Parallel()
-
-		ch := make(chan struct{})
-		var observed atomic.Bool
-
-		err := scope.Run(t.Context(), func(s *scope.Scope) error {
-			s.Go(func(ctx context.Context) error {
-				close(ch)
-				return assert.AnError
-			})
-			s.Go(func(ctx context.Context) error {
-				<-ch
-				observed.Store(ctx.Err() == nil)
-				return nil
-			})
-			return nil
-		}, scope.WithSupervisor())
-
-		assert.ErrorIs(t, err, assert.AnError)
-		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled")
-	})
-
-	t.Run("panic does not cancel sibling goroutines", func(t *testing.T) {
-		t.Parallel()
-
-		ch := make(chan struct{})
-		var observed atomic.Bool
-
-		err := scope.Run(t.Context(), func(s *scope.Scope) error {
-			s.Go(func(ctx context.Context) error {
-				close(ch)
-				panic("boom")
-			})
-			s.Go(func(ctx context.Context) error {
-				<-ch
-				observed.Store(ctx.Err() == nil)
-				return nil
-			})
-			return nil
-		}, scope.WithSupervisor())
-
-		assert.Error(t, err)
-		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled after panic")
-	})
-
-	t.Run("body error cancels goroutines even in supervisor mode", func(t *testing.T) {
-		t.Parallel()
-
-		var observed atomic.Bool
-
-		err := scope.Run(t.Context(), func(s *scope.Scope) error {
-			s.Go(func(ctx context.Context) error {
-				<-ctx.Done()
-				observed.Store(true)
-				return ctx.Err()
-			})
-			return assert.AnError
-		}, scope.WithSupervisor())
-
-		assert.ErrorIs(t, err, assert.AnError)
-		assert.True(t, observed.Load(), "goroutine should have been cancelled by body error")
-	})
-
-	t.Run("child scope goroutine error does not cancel sibling or parent goroutines", func(t *testing.T) {
-		t.Parallel()
-
-		ch1 := make(chan struct{})
-		ch2 := make(chan struct{})
-		var siblingObserved, parentObserved atomic.Bool
-
-		err := scope.Run(t.Context(), func(s *scope.Scope) error {
-			s.Scope(func(child *scope.Scope) error {
-				child.Go(func(ctx context.Context) error {
-					close(ch1)
-					return assert.AnError
-				})
-				child.Go(func(ctx context.Context) error {
-					<-ch1
-					siblingObserved.Store(ctx.Err() == nil)
-					close(ch2)
-					return nil
-				})
-				return nil
-			}, scope.WithSupervisor())
-			s.Go(func(ctx context.Context) error {
-				<-ch2
-				parentObserved.Store(ctx.Err() == nil)
-				return nil
-			})
-			return nil
-		})
-
-		assert.ErrorIs(t, err, assert.AnError)
-		assert.True(t, siblingObserved.Load(), "sibling goroutine within child scope should not have been cancelled")
-		assert.True(t, parentObserved.Load(), "parent goroutine should not have been cancelled")
-	})
-
-	t.Run("with supervisor and aggregation, all goroutine errors are collected", func(t *testing.T) {
-		t.Parallel()
-
-		errA := errors.New("error A")
-		errB := errors.New("error B")
-		ch := make(chan struct{})
-
-		err := scope.Run(t.Context(), func(s *scope.Scope) error {
-			s.Go(func(ctx context.Context) error {
-				close(ch)
-				return errA
-			})
-			s.Go(func(ctx context.Context) error {
-				<-ch
-				return errB
-			})
-			return nil
-		}, scope.WithSupervisor(), scope.WithErrAggregation())
-
-		for _, wantErr := range []error{errA, errB} {
-			assert.ErrorIs(t, err, wantErr)
-		}
-	})
-
-	t.Run("nested scopes with supervisor and aggregation collect all errors", func(t *testing.T) {
-		t.Parallel()
-
-		errA := errors.New("error A")
-		errB := errors.New("error B")
-		errC := errors.New("error C")
-
-		err := scope.Run(t.Context(), func(s *scope.Scope) error {
-			s.Go(func(ctx context.Context) error { return errA })
-			s.Scope(func(child *scope.Scope) error {
-				child.Go(func(ctx context.Context) error { return errB })
-				child.Go(func(ctx context.Context) error { return errC })
-				return nil
-			}, scope.WithSupervisor(), scope.WithErrAggregation())
-			return nil
-		}, scope.WithSupervisor(), scope.WithErrAggregation())
-
-		for _, wantErr := range []error{errA, errB, errC} {
-			assert.ErrorIs(t, err, wantErr)
-		}
-	})
 }
 
 func TestRun_CancellationCause(t *testing.T) {
@@ -778,18 +733,121 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 	}
 }
 
+func TestRun_WithSupervisor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("goroutine error does not cancel sibling goroutines", func(t *testing.T) {
+		t.Parallel()
+
+		ch := make(chan struct{})
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				close(ch)
+				return assert.AnError
+			})
+			s.Go(func(ctx context.Context) error {
+				<-ch
+				observed.Store(ctx.Err() == nil)
+				return nil
+			})
+			return nil
+		}, scope.WithSupervisor())
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled")
+	})
+
+	t.Run("panic does not cancel sibling goroutines", func(t *testing.T) {
+		t.Parallel()
+
+		ch := make(chan struct{})
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				close(ch)
+				panic("boom")
+			})
+			s.Go(func(ctx context.Context) error {
+				<-ch
+				observed.Store(ctx.Err() == nil)
+				return nil
+			})
+			return nil
+		}, scope.WithSupervisor())
+
+		assert.Error(t, err)
+		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled after panic")
+	})
+
+	t.Run("body error cancels goroutines even in supervisor mode", func(t *testing.T) {
+		t.Parallel()
+
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				<-ctx.Done()
+				observed.Store(true)
+				return ctx.Err()
+			})
+			return assert.AnError
+		}, scope.WithSupervisor())
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.True(t, observed.Load(), "goroutine should have been cancelled by body error")
+	})
+
+	t.Run("child scope goroutine error does not cancel sibling or parent goroutines", func(t *testing.T) {
+		t.Parallel()
+
+		ch1 := make(chan struct{})
+		ch2 := make(chan struct{})
+		var siblingObserved, parentObserved atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Scope(func(child *scope.Scope) error {
+				child.Go(func(ctx context.Context) error {
+					close(ch1)
+					return assert.AnError
+				})
+				child.Go(func(ctx context.Context) error {
+					<-ch1
+					siblingObserved.Store(ctx.Err() == nil)
+					close(ch2)
+					return nil
+				})
+				return nil
+			}, scope.WithSupervisor())
+			s.Go(func(ctx context.Context) error {
+				<-ch2
+				parentObserved.Store(ctx.Err() == nil)
+				return nil
+			})
+			return nil
+		})
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.True(t, siblingObserved.Load(), "sibling goroutine within child scope should not have been cancelled")
+		assert.True(t, parentObserved.Load(), "parent goroutine should not have been cancelled")
+	})
+
+}
+
 func TestRun_WithMaxConcurrency(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name        string
-		rootMax     int
+		opts        []scope.Option
 		body        func(s *scope.Scope, trackFn func(ctx context.Context) error) error
 		wantPeakMax int
 	}{
 		{
-			name:    "Run only: peak does not exceed max",
-			rootMax: 3,
+			name: "Run only: peak does not exceed max",
+			opts: []scope.Option{scope.WithMaxConcurrency(3)},
 			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
 				for range 10 {
 					s.Go(trackFn)
@@ -799,8 +857,7 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 			wantPeakMax: 3,
 		},
 		{
-			name:    "child scope only has max: peak in child does not exceed max",
-			rootMax: 0,
+			name: "child scope only has max: peak in child does not exceed max",
 			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
 				s.Scope(func(child *scope.Scope) error {
 					for range 10 {
@@ -813,8 +870,8 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 			wantPeakMax: 2,
 		},
 		{
-			name:    "root scope only has max: root max does not apply to child",
-			rootMax: 3,
+			name: "root scope only has max: root max does not apply to child",
+			opts: []scope.Option{scope.WithMaxConcurrency(3)},
 			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
 				s.Scope(func(child *scope.Scope) error {
 					for range 10 {
@@ -827,8 +884,8 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 			wantPeakMax: 10, // child has no max, root max does not apply to child
 		},
 		{
-			name:    "both root and child have max: each peak does not exceed its own max",
-			rootMax: 3,
+			name: "both root and child have max: each peak does not exceed its own max",
+			opts: []scope.Option{scope.WithMaxConcurrency(3)},
 			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
 				s.Scope(func(child *scope.Scope) error {
 					for range 10 {
@@ -866,14 +923,9 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 					return nil
 				}
 
-				var opts []scope.Option
-				if tt.rootMax > 0 {
-					opts = append(opts, scope.WithMaxConcurrency(tt.rootMax))
-				}
-
 				err := scope.Run(context.Background(), func(s *scope.Scope) error {
 					return tt.body(s, trackFn)
-				}, opts...)
+				}, tt.opts...)
 
 				assert.NoError(t, err)
 				assert.LessOrEqual(t, peak, tt.wantPeakMax)
@@ -933,16 +985,14 @@ func TestRun_WithTimeout(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		body              func(s *scope.Scope) error
-		withTimeoutOnRoot bool
-		rootTimeout       time.Duration
-		wantErr           error
+		name    string
+		body    func(s *scope.Scope) error
+		opts    []scope.Option
+		wantErr error
 	}{
 		{
-			name:              "root timeout fire: Run returns context.DeadlineExceeded",
-			withTimeoutOnRoot: true,
-			rootTimeout:       1 * time.Second,
+			name: "root timeout fire: Run returns context.DeadlineExceeded",
+			opts: []scope.Option{scope.WithTimeout(1 * time.Second)},
 			body: func(s *scope.Scope) error {
 				s.Go(func(ctx context.Context) error {
 					time.Sleep(3 * time.Second)
@@ -953,9 +1003,8 @@ func TestRun_WithTimeout(t *testing.T) {
 			wantErr: context.DeadlineExceeded,
 		},
 		{
-			name:              "root timeout does not fire: Run returns nil",
-			withTimeoutOnRoot: true,
-			rootTimeout:       5 * time.Second,
+			name: "root timeout does not fire: Run returns nil",
+			opts: []scope.Option{scope.WithTimeout(5 * time.Second)},
 			body: func(s *scope.Scope) error {
 				s.Go(func(ctx context.Context) error {
 					time.Sleep(1 * time.Second)
@@ -966,8 +1015,7 @@ func TestRun_WithTimeout(t *testing.T) {
 			wantErr: nil,
 		},
 		{
-			name:              "child only timeout fires: error propagates to parent",
-			withTimeoutOnRoot: false,
+			name: "child only timeout fires: error propagates to parent",
 			body: func(s *scope.Scope) error {
 				s.Scope(func(child *scope.Scope) error {
 					child.Go(func(ctx context.Context) error {
@@ -981,9 +1029,8 @@ func TestRun_WithTimeout(t *testing.T) {
 			wantErr: context.DeadlineExceeded,
 		},
 		{
-			name:              "timeout cancels all goroutines in scope",
-			withTimeoutOnRoot: true,
-			rootTimeout:       1 * time.Second,
+			name: "timeout cancels all goroutines in scope",
+			opts: []scope.Option{scope.WithTimeout(1 * time.Second)},
 			body: func(s *scope.Scope) error {
 				for range 3 {
 					s.Go(func(ctx context.Context) error {
@@ -996,9 +1043,8 @@ func TestRun_WithTimeout(t *testing.T) {
 			wantErr: context.DeadlineExceeded,
 		},
 		{
-			name:              "parent timeout < child timeout: parent fires first",
-			withTimeoutOnRoot: true,
-			rootTimeout:       1 * time.Second,
+			name: "parent timeout < child timeout: parent fires first",
+			opts: []scope.Option{scope.WithTimeout(1 * time.Second)},
 			body: func(s *scope.Scope) error {
 				s.Scope(func(child *scope.Scope) error {
 					child.Go(func(ctx context.Context) error {
@@ -1012,9 +1058,8 @@ func TestRun_WithTimeout(t *testing.T) {
 			wantErr: context.DeadlineExceeded,
 		},
 		{
-			name:              "parent timeout > child timeout: child fires first",
-			withTimeoutOnRoot: true,
-			rootTimeout:       5 * time.Second,
+			name: "parent timeout > child timeout: child fires first",
+			opts: []scope.Option{scope.WithTimeout(5 * time.Second)},
 			body: func(s *scope.Scope) error {
 				s.Scope(func(child *scope.Scope) error {
 					child.Go(func(ctx context.Context) error {
@@ -1028,8 +1073,7 @@ func TestRun_WithTimeout(t *testing.T) {
 			wantErr: context.DeadlineExceeded,
 		},
 		{
-			name:              "sibling timeout A < B: A fires first, B observes cancel",
-			withTimeoutOnRoot: false,
+			name: "sibling timeout A < B: A fires first, B observes cancel",
 			body: func(s *scope.Scope) error {
 				s.Scope(func(a *scope.Scope) error {
 					a.Go(func(ctx context.Context) error {
@@ -1050,9 +1094,8 @@ func TestRun_WithTimeout(t *testing.T) {
 			wantErr: context.DeadlineExceeded,
 		},
 		{
-			name:              "goroutine error fires before timeout: goroutine error takes priority",
-			withTimeoutOnRoot: true,
-			rootTimeout:       1 * time.Second,
+			name: "goroutine error fires before timeout: goroutine error takes priority",
+			opts: []scope.Option{scope.WithTimeout(1 * time.Second)},
 			body: func(s *scope.Scope) error {
 				ch := make(chan struct{})
 				s.Go(func(ctx context.Context) error {
@@ -1075,12 +1118,7 @@ func TestRun_WithTimeout(t *testing.T) {
 			t.Parallel()
 
 			synctest.Test(t, func(t *testing.T) {
-				var opts []scope.Option
-				if tt.withTimeoutOnRoot {
-					opts = append(opts, scope.WithTimeout(tt.rootTimeout))
-				}
-
-				err := scope.Run(t.Context(), tt.body, opts...)
+				err := scope.Run(t.Context(), tt.body, tt.opts...)
 
 				if tt.wantErr != nil {
 					assert.ErrorIs(t, err, tt.wantErr)
@@ -1110,104 +1148,4 @@ func TestRun_WithTimeout(t *testing.T) {
 			assert.ErrorIs(t, err, context.DeadlineExceeded)
 		})
 	})
-}
-
-func TestRun_GoFuture(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		body func(s *scope.Scope) error
-	}{
-		{
-			name: "returns value produced by goroutine",
-			body: func(s *scope.Scope) error {
-				var want = "test"
-				f := scope.GoFuture(s, func(ctx context.Context) (string, error) {
-					return want, nil
-				})
-				got, err := f.Wait()
-				assert.Equal(t, want, got)
-				return err
-			},
-		},
-		{
-			name: "two futures run concurrently and both return correct values",
-			body: func(s *scope.Scope) error {
-				var want1 = "test"
-				var want2 = "test"
-				f1 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
-					return want1, nil
-				})
-				f2 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
-					return want2, nil
-				})
-				got1, err := f1.Wait()
-				assert.Equal(t, want1, got1)
-				if err != nil {
-					return err
-				}
-
-				got2, err := f2.Wait()
-				assert.Equal(t, want2, got2)
-				if err != nil {
-					return err
-				}
-				return nil
-			},
-		},
-		{
-			name: "dag: second future uses result of first future",
-			body: func(s *scope.Scope) error {
-				f1 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
-					return 1, nil
-				})
-				f2 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
-					got1, err := f1.Wait()
-					if err != nil {
-						return 0, err
-					}
-					return 1 + got1, nil
-				})
-				got2, err := f2.Wait()
-				assert.Equal(t, got2, 2)
-				if err != nil {
-					return err
-				}
-				return nil
-			},
-		},
-		{
-			name: "future not waited does not cause leak or deadlock",
-			body: func(s *scope.Scope) error {
-				_ = scope.GoFuture(s, func(ctx context.Context) (string, error) {
-					return "test", nil
-				})
-				return nil
-			},
-		},
-		{
-			name: "Wait called inside s.Go goroutine",
-			body: func(s *scope.Scope) error {
-				f := scope.GoFuture(s, func(ctx context.Context) (int, error) {
-					return 42, nil
-				})
-				s.Go(func(ctx context.Context) error {
-					got, err := f.Wait()
-					assert.Equal(t, 42, got)
-					return err
-				})
-				return nil
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := scope.Run(t.Context(), tt.body)
-			assert.NoError(t, err)
-		})
-	}
 }
