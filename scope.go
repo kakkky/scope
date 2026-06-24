@@ -88,7 +88,7 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 // Go does not currently support generic methods. Once generic methods are
 // supported, this may be promoted to s.GoFuture(...).
 func GoFuture[T any](s *Scope, fn func(ctx context.Context) (T, error)) Future[T] {
-	future := newFuture[T]()
+	future := newFuture[T](s.ctx)
 	s.spawnGoroutine(func(ctx context.Context) error {
 		v, err := fn(ctx)
 		if err != nil {
