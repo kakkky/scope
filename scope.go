@@ -78,17 +78,17 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 	s.spawnGoroutine(fn)
 }
 
-func GoResult[T any](s *Scope, fn func(ctx context.Context) (T, error)) Result[T] {
-	result := newResult[T]()
+func GoFuture[T any](s *Scope, fn func(ctx context.Context) (T, error)) Future[T] {
+	future := newFuture[T]()
 	s.spawnGoroutine(func(ctx context.Context) error {
 		v, err := fn(ctx)
 		if err != nil {
 			return err
 		}
-		result.set(v)
+		future.set(v)
 		return nil
 	})
-	return result
+	return future
 }
 
 // Scope creates a child scope nested under s and runs body within it.
