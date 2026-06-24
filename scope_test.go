@@ -243,6 +243,18 @@ func TestRun_Error(t *testing.T) {
 			},
 			wantErr: assert.AnError,
 		},
+		{
+			name: "GoFuture fn returns error: error propagates and Wait unblocks",
+			body: func(s *scope.Scope) error {
+				f := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					return "", assert.AnError
+				})
+				_, err := f.Wait()
+				assert.ErrorIs(t, err, context.Canceled)
+				return nil
+			},
+			wantErr: assert.AnError,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1098,4 +1110,104 @@ func TestRun_WithTimeout(t *testing.T) {
 			assert.ErrorIs(t, err, context.DeadlineExceeded)
 		})
 	})
+}
+
+func TestRun_GoFuture(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body func(s *scope.Scope) error
+	}{
+		{
+			name: "returns value produced by goroutine",
+			body: func(s *scope.Scope) error {
+				var want = "test"
+				f := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					return want, nil
+				})
+				got, err := f.Wait()
+				assert.Equal(t, want, got)
+				return err
+			},
+		},
+		{
+			name: "two futures run concurrently and both return correct values",
+			body: func(s *scope.Scope) error {
+				var want1 = "test"
+				var want2 = "test"
+				f1 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					return want1, nil
+				})
+				f2 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					return want2, nil
+				})
+				got1, err := f1.Wait()
+				assert.Equal(t, want1, got1)
+				if err != nil {
+					return err
+				}
+
+				got2, err := f2.Wait()
+				assert.Equal(t, want2, got2)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+		{
+			name: "dag: second future uses result of first future",
+			body: func(s *scope.Scope) error {
+				f1 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					return 1, nil
+				})
+				f2 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					got1, err := f1.Wait()
+					if err != nil {
+						return 0, err
+					}
+					return 1 + got1, nil
+				})
+				got2, err := f2.Wait()
+				assert.Equal(t, got2, 2)
+				if err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+		{
+			name: "future not waited does not cause leak or deadlock",
+			body: func(s *scope.Scope) error {
+				_ = scope.GoFuture(s, func(ctx context.Context) (string, error) {
+					return "test", nil
+				})
+				return nil
+			},
+		},
+		{
+			name: "Wait called inside s.Go goroutine",
+			body: func(s *scope.Scope) error {
+				f := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					return 42, nil
+				})
+				s.Go(func(ctx context.Context) error {
+					got, err := f.Wait()
+					assert.Equal(t, 42, got)
+					return err
+				})
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := scope.Run(t.Context(), tt.body)
+			assert.NoError(t, err)
+		})
+	}
 }

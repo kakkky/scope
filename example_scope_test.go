@@ -477,3 +477,45 @@ func ExampleScope_Scope_errAggregationParentOnly() {
 	// Output:
 	// true
 }
+
+// ExampleGoFuture_dag shows how GoFuture enables DAG-style computation.
+// A and B are computed in parallel; C depends on A and waits inside its goroutine.
+// The final goroutine combines B and C once both are ready.
+func ExampleGoFuture_dag() {
+	scope.Run(context.Background(), func(s *scope.Scope) error {
+		aF := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+			return 3 * 3, nil // A = 9
+		})
+		bF := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+			return 2 * 2, nil // B = 4, runs in parallel with A
+		})
+
+		// C waits on A inside the goroutine
+		cF := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+			a, err := aF.Wait()
+			if err != nil {
+				return 0, err
+			}
+			return a + 1, nil // C = A + 1 = 10
+		})
+
+		// final result waits on B and C inside the goroutine
+		s.Go(func(ctx context.Context) error {
+			b, err := bF.Wait()
+			if err != nil {
+				return err
+			}
+			c, err := cF.Wait()
+			if err != nil {
+				return err
+			}
+			fmt.Println(b + c) // B + C = 14
+			return nil
+		})
+
+		return nil
+	})
+
+	// Output:
+	// 14
+}
