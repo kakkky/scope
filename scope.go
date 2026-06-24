@@ -78,6 +78,15 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 	s.spawnGoroutine(fn)
 }
 
+// GoFuture starts fn in a new goroutine bound to the scope and returns a Future
+// that can be used to retrieve the result via Future.Wait.
+//
+// If fn returns a non-nil error, the error is propagated through the scope's
+// error handling mechanism (same as Go) and Wait will unblock via ctx cancellation.
+//
+// Note: this is a package-level function rather than a method on Scope because
+// Go does not currently support generic methods. Once generic methods are
+// supported, this may be promoted to s.GoFuture(...).
 func GoFuture[T any](s *Scope, fn func(ctx context.Context) (T, error)) Future[T] {
 	future := newFuture[T]()
 	s.spawnGoroutine(func(ctx context.Context) error {
