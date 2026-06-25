@@ -191,25 +191,20 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	s.closed = true
 	s.cond.L.Unlock()
 
-	if o.timeout > 0 {
-		if cause := context.Cause(s.ctx); errors.Is(cause, context.DeadlineExceeded) {
-			if s.errAggregation {
-				return errors.Join(append(s.errs, cause)...)
-			}
-			return cause
+	cause := context.Cause(s.ctx)
+	switch {
+	case o.timeout > 0 && errors.Is(cause, context.DeadlineExceeded):
+		if s.errAggregation {
+			return errors.Join(append(s.errs, cause)...)
 		}
-	}
-
-	if o.cancelOnSuccess {
-		if cause := context.Cause(s.ctx); errors.Is(cause, errCanceledOnSuccess) {
-			return nil
-		}
-	}
-
-	if s.errAggregation {
+		return cause
+	case o.cancelOnSuccess && errors.Is(cause, errCanceledOnSuccess):
+		return nil
+	case s.errAggregation:
 		return errors.Join(s.errs...)
+	default:
+		return s.err
 	}
-	return s.err
 }
 
 func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
