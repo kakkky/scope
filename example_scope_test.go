@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -195,6 +196,40 @@ func ExampleRun_withTimeout() {
 
 	// Output:
 	// true
+}
+
+// ExampleRun_withCancelOnSuccess shows a hedged request pattern: send the same
+// request to multiple backends and use the first successful response,
+// canceling the rest.
+func ExampleRun_withCancelOnSuccess() {
+	ctx := context.Background()
+
+	var (
+		once   sync.Once
+		result string
+	)
+
+	err := scope.Run(ctx, func(s *scope.Scope) error {
+		s.Go(func(ctx context.Context) error {
+			// fast backend: responds immediately
+			once.Do(func() { result = "response from A" })
+			return nil
+		})
+		s.Go(func(ctx context.Context) error {
+			// slow backend: canceled before responding
+			<-ctx.Done()
+			once.Do(func() { result = "response from B" })
+			return ctx.Err()
+		})
+		return nil
+	}, scope.WithCancelOnSuccess())
+
+	fmt.Println(result)
+	fmt.Println("err:", err)
+
+	// Output:
+	// response from A
+	// err: <nil>
 }
 
 // ExampleScope_Go_dynamicSpawn shows that goroutines can be spawned dynamically
