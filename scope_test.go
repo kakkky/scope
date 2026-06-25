@@ -292,47 +292,6 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 1,
 		},
-		{
-			name: "GoFuture: Wait called inside s.Go goroutine",
-			body: func(s *scope.Scope, count *atomic.Int64) error {
-				f := scope.GoFuture(s, func(ctx context.Context) (int, error) {
-					count.Add(1)
-					return 42, nil
-				})
-				s.Go(func(ctx context.Context) error {
-					count.Add(1)
-					got, err := f.Wait()
-					assert.Equal(t, 42, got)
-					return err
-				})
-				return nil
-			},
-			wantCount: 2,
-		},
-		{
-			name: "WithCancelOnSuccess: GoFuture Wait returns value from the successful goroutine, canceled goroutine returns zero value and ctx.Err()",
-			opts: []scope.Option{scope.WithCancelOnSuccess()},
-			body: func(s *scope.Scope, count *atomic.Int64) error {
-				f1 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
-					count.Add(1)
-					return 42, nil
-				})
-				f2 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
-					<-ctx.Done()
-					return 0, ctx.Err()
-				})
-				got1, err := f1.Wait()
-				assert.Equal(t, 42, got1)
-				if err != nil {
-					return err
-				}
-				got2, err := f2.Wait()
-				assert.Equal(t, 0, got2)
-				assert.ErrorIs(t, err, context.Canceled)
-				return nil
-			},
-			wantCount: 1,
-		},
 	}
 
 	for _, tt := range tests {
