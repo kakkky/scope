@@ -7,10 +7,11 @@ type Option func(*options)
 
 // options holds the configuration applied by Option values.
 type options struct {
-	supervisor     bool
-	errAggregation bool
-	maxConcurrency int // 0 means no limit
-	timeout        time.Duration
+	supervisor      bool
+	errAggregation  bool
+	maxConcurrency  int // 0 means no limit
+	timeout         time.Duration
+	cancelOnSuccess bool
 }
 
 // WithSupervisor returns an Option that enables supervisor mode for the scope.
@@ -82,5 +83,11 @@ func WithMaxConcurrency(max int) Option {
 func WithTimeout(d time.Duration) Option {
 	return func(o *options) {
 		o.timeout = d
+	}
+}
+
+func WithCancelOnSuccess() Option {
+	return func(o *options) {
+		o.cancelOnSuccess = true
 	}
 }

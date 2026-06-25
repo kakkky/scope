@@ -10,6 +10,8 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+var errCanceledOnSuccess = errors.New("scope: canceled on first success")
+
 // Scope represents a structured concurrency scope.
 //
 // A Scope owns a derived context.Context that is canceled when any spawned
@@ -36,6 +38,8 @@ type Scope struct {
 	errs           []error
 
 	sem *semaphore.Weighted
+
+	cancelOnSuccess bool
 }
 
 // Run executes body inside a new Scope derived from parent and waits for all
@@ -159,11 +163,12 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 
 	s := &Scope{
-		ctx:            ctx,
-		cancel:         cancel,
-		cond:           sync.NewCond(&sync.Mutex{}),
-		supervisor:     o.supervisor,
-		errAggregation: o.errAggregation,
+		ctx:             ctx,
+		cancel:          cancel,
+		cond:            sync.NewCond(&sync.Mutex{}),
+		supervisor:      o.supervisor,
+		errAggregation:  o.errAggregation,
+		cancelOnSuccess: o.cancelOnSuccess,
 	}
 
 	if o.maxConcurrency > 0 {
@@ -187,11 +192,17 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	s.cond.L.Unlock()
 
 	if o.timeout > 0 {
-		if cause := context.Cause(s.ctx); cause == context.DeadlineExceeded {
+		if cause := context.Cause(s.ctx); errors.Is(cause, context.DeadlineExceeded) {
 			if s.errAggregation {
 				return errors.Join(append(s.errs, cause)...)
 			}
 			return cause
+		}
+	}
+
+	if o.cancelOnSuccess {
+		if cause := context.Cause(s.ctx); errors.Is(cause, errCanceledOnSuccess) {
+			return nil
 		}
 	}
 
@@ -247,6 +258,8 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
 			if !s.supervisor {
 				s.cancel(err)
 			}
+		} else if s.cancelOnSuccess {
+			s.cancel(errCanceledOnSuccess)
 		}
 	}()
 }
