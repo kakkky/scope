@@ -292,6 +292,23 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 1,
 		},
+		{
+			name: "GoFuture: Wait called inside s.Go goroutine",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				f := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					count.Add(1)
+					return 42, nil
+				})
+				s.Go(func(ctx context.Context) error {
+					count.Add(1)
+					got, err := f.Wait()
+					assert.Equal(t, 42, got)
+					return err
+				})
+				return nil
+			},
+			wantCount: 2,
+		},
 	}
 
 	for _, tt := range tests {
