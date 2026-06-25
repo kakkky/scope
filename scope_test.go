@@ -19,6 +19,7 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name      string
 		body      func(s *scope.Scope, count *atomic.Int64) error
+		opts      []scope.Option
 		wantCount int64
 	}{
 		{
@@ -140,6 +141,79 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 2,
 		},
+		{
+			name: "WithCancelOnSuccess: first success cancels remaining goroutines",
+			opts: []scope.Option{scope.WithCancelOnSuccess()},
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Go(func(ctx context.Context) error {
+					count.Add(1)
+					return nil
+				})
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					return ctx.Err()
+				})
+				return nil
+			},
+			wantCount: 1,
+		},
+		{
+			name: "WithCancelOnSuccess: Run returns nil even if remaining goroutines return ctx.Err()",
+			opts: []scope.Option{scope.WithCancelOnSuccess()},
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Go(func(ctx context.Context) error {
+					count.Add(1)
+					return nil
+				})
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					return ctx.Err()
+				})
+				return nil
+			},
+			wantCount: 1,
+		},
+		{
+			name: "WithCancelOnSuccess: parent cancel propagates to child scope",
+			opts: []scope.Option{scope.WithCancelOnSuccess()},
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Go(func(ctx context.Context) error {
+					count.Add(1)
+					return nil
+				})
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						return ctx.Err()
+					})
+					return nil
+				})
+				return nil
+			},
+			wantCount: 1,
+		},
+		{
+			name: "WithCancelOnSuccess: child cancel does not propagate to parent",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						count.Add(1)
+						return nil
+					})
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						return ctx.Err()
+					})
+					return nil
+				}, scope.WithCancelOnSuccess())
+				s.Go(func(ctx context.Context) error {
+					count.Add(10)
+					return ctx.Err() // returns nil if parent ctx is not canceled
+				})
+				return nil
+			},
+			wantCount: 11,
+		},
 		// GoFuture
 		{
 			name: "GoFuture: returns value produced by goroutine",
@@ -235,6 +309,30 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 2,
 		},
+		{
+			name: "WithCancelOnSuccess: GoFuture Wait returns value from the successful goroutine, canceled goroutine returns zero value and ctx.Err()",
+			opts: []scope.Option{scope.WithCancelOnSuccess()},
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				f1 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					count.Add(1)
+					return 42, nil
+				})
+				f2 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+					<-ctx.Done()
+					return 0, ctx.Err()
+				})
+				got1, err := f1.Wait()
+				assert.Equal(t, 42, got1)
+				if err != nil {
+					return err
+				}
+				got2, err := f2.Wait()
+				assert.Equal(t, 0, got2)
+				assert.ErrorIs(t, err, context.Canceled)
+				return nil
+			},
+			wantCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -243,7 +341,7 @@ func TestRun(t *testing.T) {
 			var count atomic.Int64
 			err := scope.Run(context.Background(), func(s *scope.Scope) error {
 				return tt.body(s, &count)
-			})
+			}, tt.opts...)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantCount, count.Load())
 		})
