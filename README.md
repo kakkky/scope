@@ -21,47 +21,99 @@ Requires Go 1.25 or later.
 ## Quick Start
 
 ```go
-package main
-
-import (
-    "context"
-    "fmt"
-
-    "github.com/kakkky/scope"
-)
-
-func main() {
-    err := scope.Run(context.Background(), func(s *scope.Scope) error {
-        s.Go(func(ctx context.Context) error {
-            // do something
-            return nil
-        })
-        s.Go(func(ctx context.Context) error {
-            return doSomething(ctx)
-        })
-        return nil
+err := scope.Run(context.Background(), func(s *scope.Scope) error {
+    s.Go(func(ctx context.Context) error {
+        return doA(ctx)
     })
-    // By the time we get here, both goroutines have finished.
-
-    if err != nil {
-        fmt.Println("error:", err)
-    }
-}
+    s.Go(func(ctx context.Context) error {
+        return doB(ctx)
+    })
+    return nil
+})
+// By the time we get here, both goroutines have finished.
 ```
 
-The `scope.Run` block is a hard boundary: it does not return until every goroutine spawned via `s.Go` has finished. When the first non-nil error occurs, the scope's context is cancelled so sibling goroutines can observe `ctx.Done()` and exit; panics are recovered into errors, and cancellation propagates downstream.
+`scope.Run` does not return until every goroutine spawned via `s.Go` has finished. When the first non-nil error occurs, the scope's context is cancelled so sibling goroutines can observe `ctx.Done()` and exit. Panics are recovered into errors and returned through the same path.
 
-## What it gives you
+## API Reference
 
-- **Lifetime bound to a block.** Goroutines spawned with `s.Go` cannot outlive the enclosing `scope.Run` call. The boundary is the closing brace.
-- **First-error-wins, with context cancellation.** Every goroutine receives the scope's context as an argument. When any goroutine returns a non-nil error, the context is cancelled so siblings can observe `ctx.Done()` and exit.
-- **Panic safety.** A panic in any spawned goroutine is recovered, formatted with its stack trace, and returned through the same error path. Your process does not crash.
-- **Nested scopes.** `s.Scope` creates a child scope whose context is derived from the parent's. The call is synchronous — it blocks until the child's body and all goroutines within it finish. Cancellation propagates from parent to child; errors in the child propagate back and cancel the parent's context.
-- **Dynamic spawning.** `s.Go` may be called from inside other goroutines, recursively, or after the body has returned — all of them are still bound to the same scope.
+For full documentation, see [pkg.go.dev/github.com/kakkky/scope](https://pkg.go.dev/github.com/kakkky/scope).
 
-## Documentation
+### `Run`
 
-Full API reference: [pkg.go.dev/github.com/kakkky/scope](https://pkg.go.dev/github.com/kakkky/scope)
+```go
+func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error
+```
+
+Establishes a scope, executes `body`, and waits for all goroutines spawned via `s.Go` to finish before returning. The scope's context is derived from `ctx` and cancelled when any goroutine or `body` returns a non-nil error, or when a panic is recovered.
+
+### `Scope.Go`
+
+```go
+func (s *Scope) Go(fn func(ctx context.Context) error)
+```
+
+Spawns `fn` in a new goroutine bound to the scope. `fn` receives the scope's context so it can participate in cancellation. `Go` may be called from within `body`, from another goroutine spawned by the same scope, or recursively — all goroutines remain bound to the enclosing `Run`.
+
+### `GoFuture[T]`
+
+```go
+func GoFuture[T any](s *Scope, fn func(ctx context.Context) (T, error)) Future[T]
+```
+
+Spawns `fn` in a new goroutine and returns a `Future[T]` to retrieve the result. `future.Wait()` blocks until the value is available or the scope's context is cancelled.
+
+### `Scope.Scope`
+
+```go
+func (s *Scope) Scope(body func(child *Scope) error, opts ...Option)
+```
+
+Creates a child scope nested under `s` and runs `body` synchronously within it. The call blocks until `body` and all goroutines spawned in the child have finished. Cancellation propagates from parent to child; errors in the child propagate back and cancel the parent's context.
+
+### Options
+
+Options are passed to `Run` or `Scope.Scope` to configure the scope. Each scope opts in independently; options are not inherited by child scopes.
+
+#### `WithSupervisor`
+
+```go
+func WithSupervisor() Option
+```
+
+In supervisor mode, a failure in one goroutine does not cancel the context of sibling goroutines. Each goroutine runs to completion regardless of others' results.
+
+#### `WithErrAggregation`
+
+```go
+func WithErrAggregation() Option
+```
+
+By default, only the first error is returned (first-error-wins). With this option, all errors from goroutines and `body` are collected and returned as a single error via `errors.Join`. Most useful in combination with `WithSupervisor`.
+
+#### `WithMaxConcurrency`
+
+```go
+func WithMaxConcurrency(max int) Option
+```
+
+Limits the number of goroutines that may execute concurrently within the scope. When the limit is reached, calls to `Go` block until a running goroutine completes or the scope's context is cancelled.
+
+#### `WithTimeout`
+
+```go
+func WithTimeout(d time.Duration) Option
+```
+
+Cancels the scope's context after duration `d`. When the timeout fires, `Run` returns `context.DeadlineExceeded`. If an earlier deadline is already set on the parent context, that deadline takes precedence.
+
+#### `WithCancelOnSuccess`
+
+```go
+func WithCancelOnSuccess() Option
+```
+
+Cancels the scope's context as soon as any goroutine returns a nil error, allowing sibling goroutines to observe `ctx.Done()` and exit early. `Run` returns nil when this option triggers the cancellation.
 
 ## Background
 
