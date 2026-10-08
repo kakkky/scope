@@ -47,7 +47,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.12.2
+          version: v2.14.0
 
       - name: Check gofmt
         run: |

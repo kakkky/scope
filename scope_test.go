@@ -219,7 +219,7 @@ func TestRun(t *testing.T) {
 			name: "GoFuture: returns value produced by goroutine",
 			body: func(s *scope.Scope, count *atomic.Int64) error {
 				var want = "test"
-				f := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+				f := s.GoFuture(func(ctx context.Context) (string, error) {
 					count.Add(1)
 					return want, nil
 				})
@@ -234,11 +234,11 @@ func TestRun(t *testing.T) {
 			body: func(s *scope.Scope, count *atomic.Int64) error {
 				var want1 = "test"
 				var want2 = "test"
-				f1 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+				f1 := s.GoFuture(func(ctx context.Context) (string, error) {
 					count.Add(1)
 					return want1, nil
 				})
-				f2 := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+				f2 := s.GoFuture(func(ctx context.Context) (string, error) {
 					count.Add(1)
 					return want2, nil
 				})
@@ -260,11 +260,11 @@ func TestRun(t *testing.T) {
 		{
 			name: "GoFuture: dag: second future uses result of first future",
 			body: func(s *scope.Scope, count *atomic.Int64) error {
-				f1 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+				f1 := s.GoFuture(func(ctx context.Context) (int, error) {
 					count.Add(1)
 					return 1, nil
 				})
-				f2 := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+				f2 := s.GoFuture(func(ctx context.Context) (int, error) {
 					got1, err := f1.Wait()
 					if err != nil {
 						return 0, err
@@ -284,7 +284,7 @@ func TestRun(t *testing.T) {
 		{
 			name: "GoFuture: future not waited does not cause leak or deadlock",
 			body: func(s *scope.Scope, count *atomic.Int64) error {
-				_ = scope.GoFuture(s, func(ctx context.Context) (string, error) {
+				_ = s.GoFuture(func(ctx context.Context) (string, error) {
 					count.Add(1)
 					return "test", nil
 				})
@@ -295,7 +295,7 @@ func TestRun(t *testing.T) {
 		{
 			name: "GoFuture: Wait called inside s.Go goroutine",
 			body: func(s *scope.Scope, count *atomic.Int64) error {
-				f := scope.GoFuture(s, func(ctx context.Context) (int, error) {
+				f := s.GoFuture(func(ctx context.Context) (int, error) {
 					count.Add(1)
 					return 42, nil
 				})
@@ -422,7 +422,7 @@ func TestRun_Error(t *testing.T) {
 		{
 			name: "GoFuture fn returns error: error propagates and Wait unblocks",
 			body: func(s *scope.Scope) error {
-				f := scope.GoFuture(s, func(ctx context.Context) (string, error) {
+				f := s.GoFuture(func(ctx context.Context) (string, error) {
 					return "", assert.AnError
 				})
 				_, err := f.Wait()

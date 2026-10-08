@@ -16,7 +16,7 @@ Scope-bound structured concurrency for Go.
 go get github.com/kakkky/scope
 ```
 
-Requires Go 1.25 or later.
+Requires Go 1.27 or later. If you are on an older Go version, use `v0.8.0`.
 
 ## Quick Start
 
@@ -55,10 +55,10 @@ func (s *Scope) Go(fn func(ctx context.Context) error)
 
 Spawns `fn` in a new goroutine bound to the scope. `fn` receives the scope's context so it can participate in cancellation. `Go` may be called from within `body`, from another goroutine spawned by the same scope, or recursively — all goroutines remain bound to the enclosing `Run`.
 
-### `GoFuture[T]`
+### `Scope.GoFuture[T]`
 
 ```go
-func GoFuture[T any](s *Scope, fn func(ctx context.Context) (T, error)) Future[T]
+func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[T]
 ```
 
 Spawns `fn` in a new goroutine and returns a `Future[T]` to retrieve the result. `future.Wait()` blocks until the value is available or the scope's context is cancelled.

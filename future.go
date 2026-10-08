@@ -2,8 +2,8 @@ package scope
 
 import "context"
 
-// Future represents a value that will be produced by a goroutine started with GoFuture.
-// The zero value is not usable; obtain one via GoFuture.
+// Future represents a value that will be produced by a goroutine started with Scope.GoFuture.
+// The zero value is not usable; obtain one via Scope.GoFuture.
 type Future[T any] struct {
 	ctx     context.Context
 	valueCh chan T
