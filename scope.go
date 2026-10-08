@@ -87,11 +87,7 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 //
 // If fn returns a non-nil error, the error is propagated through the scope's
 // error handling mechanism (same as Go) and Wait will unblock via ctx cancellation.
-//
-// Note: this is a package-level function rather than a method on Scope because
-// Go does not currently support generic methods. Once generic methods are
-// supported, this may be promoted to s.GoFuture(...).
-func GoFuture[T any](s *Scope, fn func(ctx context.Context) (T, error)) Future[T] {
+func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[T] {
 	future := newFuture[T](s.ctx)
 	s.spawnGoroutine(func(ctx context.Context) error {
 		v, err := fn(ctx)
