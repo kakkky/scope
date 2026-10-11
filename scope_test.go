@@ -771,6 +771,7 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		opts      []scope.Option
 		call      func(s *scope.Scope)
 		wantPanic string
 	}{
@@ -782,7 +783,23 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 			wantPanic: "scope: misuse: Go called outside scope lifetime",
 		},
 		{
+			name: "Go panics when called after Run returned with WithMaxConcurrency",
+			opts: []scope.Option{scope.WithMaxConcurrency(1)},
+			call: func(s *scope.Scope) {
+				s.Go(func(ctx context.Context) error { return nil })
+			},
+			wantPanic: "scope: misuse: Go called outside scope lifetime",
+		},
+		{
 			name: "Scope panics when called after Run returned",
+			call: func(s *scope.Scope) {
+				s.Scope(func(child *scope.Scope) error { return nil })
+			},
+			wantPanic: "scope: misuse: Scope called outside scope lifetime",
+		},
+		{
+			name: "Scope panics when called after Run returned with WithMaxConcurrency",
+			opts: []scope.Option{scope.WithMaxConcurrency(1)},
 			call: func(s *scope.Scope) {
 				s.Scope(func(child *scope.Scope) error { return nil })
 			},
@@ -798,7 +815,7 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 			err := scope.Run(t.Context(), func(s *scope.Scope) error {
 				captured = s
 				return nil
-			})
+			}, tt.opts...)
 			assert.NoError(t, err)
 			assert.PanicsWithValue(t, tt.wantPanic, func() {
 				tt.call(captured)

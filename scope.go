@@ -204,6 +204,16 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 }
 
 func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
+	// Check closed before touching the semaphore. After Run returns, s.ctx is
+	// canceled, so Acquire would fail immediately and the misuse would go
+	// undetected; the closed flag is the authoritative signal.
+	s.cond.L.Lock()
+	if s.closed {
+		s.cond.L.Unlock()
+		panic("scope: misuse: Go called outside scope lifetime")
+	}
+	s.cond.L.Unlock()
+
 	if s.sem != nil {
 		if err := s.sem.Acquire(s.ctx, 1); err != nil {
 			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
@@ -212,8 +222,13 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
 	}
 
 	s.cond.L.Lock()
+	// closed may have flipped while Acquire was blocked; release the slot
+	// before reporting the misuse so it is not leaked.
 	if s.closed {
 		s.cond.L.Unlock()
+		if s.sem != nil {
+			s.sem.Release(1)
+		}
 		panic("scope: misuse: Go called outside scope lifetime")
 	}
 	s.activeG++
