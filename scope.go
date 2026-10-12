@@ -137,7 +137,7 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 
 	if err := run(s.ctx, body, opts...); err != nil {
 		s.recordErr(err)
-		if !o.supervisor {
+		if !s.supervisor && !o.supervisor {
 			s.cancel(err)
 		}
 	}

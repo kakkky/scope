@@ -907,7 +907,28 @@ func TestRun_WithSupervisor(t *testing.T) {
 		assert.True(t, siblingObserved.Load(), "sibling goroutine within child scope should not have been cancelled")
 		assert.True(t, parentObserved.Load(), "parent goroutine should not have been cancelled")
 	})
+	t.Run("supervisor parent: a child scope error does not cancel the parent's context", func(t *testing.T) {
+		t.Parallel()
 
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Scope(func(child *scope.Scope) error {
+				child.Go(func(ctx context.Context) error {
+					return assert.AnError
+				})
+				return nil
+			})
+			s.Go(func(ctx context.Context) error {
+				observed.Store(ctx.Err() == nil)
+				return nil
+			})
+			return nil
+		}, scope.WithSupervisor())
+
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.True(t, observed.Load(), "parent goroutine should not have been cancelled by the child scope error")
+	})
 }
 
 func TestRun_WithMaxConcurrency(t *testing.T) {
