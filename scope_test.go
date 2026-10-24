@@ -798,6 +798,89 @@ func TestRun_PanicInGo(t *testing.T) {
 
 }
 
+func TestRun_PanicInBody(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body func(s *scope.Scope, finished *atomic.Bool) error
+	}{
+		{
+			name: "Run waits for goroutines and re-panics with the original value",
+			body: func(s *scope.Scope, finished *atomic.Bool) error {
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(time.Second)
+					finished.Store(true)
+					return nil
+				})
+				panic("boom")
+			},
+		},
+		{
+			name: "child scope body panic waits for child goroutines and propagates",
+			body: func(s *scope.Scope, finished *atomic.Bool) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						time.Sleep(time.Second)
+						finished.Store(true)
+						return nil
+					})
+					panic("boom")
+				})
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var finished atomic.Bool
+				assert.PanicsWithValue(t, "boom", func() {
+					scope.Run(t.Context(), func(s *scope.Scope) error {
+						return tt.body(s, &finished)
+					})
+				})
+				assert.True(t, finished.Load(), "goroutine should finish before Run unwinds")
+			})
+		})
+	}
+
+	t.Run("body panic cancels the scope's context", func(t *testing.T) {
+		t.Parallel()
+
+		var cause error
+		assert.Panics(t, func() {
+			scope.Run(t.Context(), func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					cause = context.Cause(ctx)
+					return ctx.Err()
+				})
+				panic("boom")
+			})
+		})
+		assert.EqualError(t, cause, "scope: body did not return normally")
+	})
+
+	t.Run("scope is closed after body panic: Go panics when called after Run unwound", func(t *testing.T) {
+		t.Parallel()
+
+		var captured *scope.Scope
+		assert.Panics(t, func() {
+			scope.Run(t.Context(), func(s *scope.Scope) error {
+				captured = s
+				panic("boom")
+			})
+		})
+		assert.PanicsWithValue(t, "scope: misuse: Go called outside scope lifetime", func() {
+			captured.Go(func(ctx context.Context) error { return nil })
+		})
+	})
+}
+
 func TestRun_CancellationCause(t *testing.T) {
 	t.Parallel()
 
