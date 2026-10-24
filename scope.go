@@ -85,18 +85,25 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 // GoFuture starts fn in a new goroutine bound to the scope and returns a Future
 // that can be used to retrieve the result via Future.Wait.
 //
-// If fn returns a non-nil error, the error is propagated through the scope's
-// error handling mechanism (same as Go) and Wait will unblock via ctx cancellation.
+// If fn returns a non-nil error or panics, the error is propagated through the
+// scope's error handling mechanism (same as Go) and is also returned by Wait.
 func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[T] {
-	future := newFuture[T](s.ctx)
-	s.spawnGoroutine(func(ctx context.Context) error {
-		v, err := fn(ctx)
-		if err != nil {
-			return err
-		}
-		future.set(v)
-		return nil
+	future := newFuture[T]()
+	spawned := s.spawnGoroutine(func(ctx context.Context) (err error) {
+		var v T
+		defer func() {
+			if r := recover(); r != nil {
+				err = newPanicError(r)
+			}
+			future.resolve(v, err)
+		}()
+		v, err = fn(ctx)
+		return err
 	})
+	if !spawned {
+		var zero T
+		future.resolve(zero, context.Cause(s.ctx))
+	}
 	return future
 }
 
@@ -203,11 +210,13 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	}
 }
 
-func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
+// spawnGoroutine reports whether fn was spawned. It returns false only when
+// the scope's context is canceled while waiting for a concurrency slot.
+func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) (spawned bool) {
 	if s.sem != nil {
 		if err := s.sem.Acquire(s.ctx, 1); err != nil {
 			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
-			return
+			return false
 		}
 	}
 
@@ -235,7 +244,7 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
 		}()
 		defer func() {
 			if r := recover(); r != nil {
-				err := fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
+				err := newPanicError(r)
 				s.recordErr(err)
 				if !s.supervisor {
 					s.cancel(err)
@@ -253,6 +262,11 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) {
 			s.cancel(errCanceledOnSuccess)
 		}
 	}()
+	return true
+}
+
+func newPanicError(r any) error {
+	return fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
 }
 
 // recordErr stores err according to the aggregation policy.

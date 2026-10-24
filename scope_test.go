@@ -309,6 +309,46 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 2,
 		},
+		{
+			name: "GoFuture: Wait returns the same value on every call",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				f := s.GoFuture(func(ctx context.Context) (int, error) {
+					return 42, nil
+				})
+				for range 2 {
+					s.Go(func(ctx context.Context) error {
+						count.Add(1)
+						got, err := f.Wait()
+						assert.Equal(t, 42, got)
+						return err
+					})
+				}
+				got, err := f.Wait()
+				assert.Equal(t, 42, got)
+				return err
+			},
+			wantCount: 2,
+		},
+		{
+			name: "GoFuture: Wait returns value even after WithCancelOnSuccess cancels the scope",
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				f := s.GoFuture(func(ctx context.Context) (int, error) {
+					count.Add(1)
+					return 42, nil
+				})
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					return nil
+				})
+				time.Sleep(1 * time.Second)
+
+				got, err := f.Wait()
+				assert.Equal(t, 42, got)
+				return err
+			},
+			opts:      []scope.Option{scope.WithCancelOnSuccess()},
+			wantCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -325,6 +365,23 @@ func TestRun(t *testing.T) {
 			})
 		})
 	}
+
+	t.Run("GoFuture: Wait returns value after Run has returned", func(t *testing.T) {
+		t.Parallel()
+
+		var f scope.Future[int]
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			f = s.GoFuture(func(ctx context.Context) (int, error) {
+				return 42, nil
+			})
+			return nil
+		})
+		require.NoError(t, err)
+
+		got, err := f.Wait()
+		assert.NoError(t, err)
+		assert.Equal(t, 42, got)
+	})
 }
 
 func TestRun_Error(t *testing.T) {
@@ -423,15 +480,85 @@ func TestRun_Error(t *testing.T) {
 			wantErrs: []error{assert.AnError},
 		},
 		{
-			name: "GoFuture fn returns error: error propagates and Wait unblocks",
+			name: "GoFuture fn returns error: error propagates and Wait returns it",
 			body: func(s *scope.Scope) error {
 				f := s.GoFuture(func(ctx context.Context) (string, error) {
 					return "", assert.AnError
 				})
 				_, err := f.Wait()
-				assert.ErrorIs(t, err, context.Canceled)
+				assert.ErrorIs(t, err, assert.AnError)
 				return nil
 			},
+			wantErrs: []error{assert.AnError},
+		},
+		{
+			name: "GoFuture fn returns error in supervisor mode: Wait returns it without deadlock",
+			body: func(s *scope.Scope) error {
+				f := s.GoFuture(func(ctx context.Context) (string, error) {
+					return "", assert.AnError
+				})
+				_, err := f.Wait()
+				assert.ErrorIs(t, err, assert.AnError)
+				return nil
+			},
+			opts:     []scope.Option{scope.WithSupervisor()},
+			wantErrs: []error{assert.AnError},
+		},
+		{
+			name: "GoFuture: Wait returns value produced before the scope was canceled by a sibling error",
+			body: func(s *scope.Scope) error {
+				f := s.GoFuture(func(ctx context.Context) (int, error) {
+					return 42, nil
+				})
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(1 * time.Second)
+					return assert.AnError
+				})
+				time.Sleep(2 * time.Second)
+
+				got, err := f.Wait()
+				assert.NoError(t, err)
+				assert.Equal(t, 42, got)
+				return nil
+			},
+			wantErrs: []error{assert.AnError},
+		},
+		{
+			name: "GoFuture: Wait returns value produced before WithTimeout fires",
+			body: func(s *scope.Scope) error {
+				f := s.GoFuture(func(ctx context.Context) (int, error) {
+					return 42, nil
+				})
+				time.Sleep(2 * time.Second)
+
+				got, err := f.Wait()
+				assert.NoError(t, err)
+				assert.Equal(t, 42, got)
+				return nil
+			},
+			opts:     []scope.Option{scope.WithTimeout(1 * time.Second)},
+			wantErrs: []error{context.DeadlineExceeded},
+		},
+		{
+			name: "GoFuture fn never started due to WithMaxConcurrency: Wait returns cancellation cause",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(1 * time.Second)
+					return assert.AnError
+				})
+				// blocks on the semaphore until the first goroutine cancels the scope
+				var fnRan atomic.Bool
+				f := s.GoFuture(func(ctx context.Context) (int, error) {
+					fnRan.Store(true)
+					return 42, nil
+				})
+
+				_, err := f.Wait()
+				assert.ErrorIs(t, err, assert.AnError)
+				assert.False(t, fnRan.Load(), "fn should not have run: Acquire should have failed on ctx cancellation")
+				return nil
+			},
+			opts:     []scope.Option{scope.WithMaxConcurrency(1)},
 			wantErrs: []error{assert.AnError},
 		},
 		// WithErrAggregation
@@ -814,6 +941,23 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 
 func TestRun_WithSupervisor(t *testing.T) {
 	t.Parallel()
+
+	t.Run("GoFuture fn panic: Wait returns panic error without deadlock", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			err := scope.Run(t.Context(), func(s *scope.Scope) error {
+				f := s.GoFuture(func(ctx context.Context) (int, error) {
+					panic("boom")
+				})
+				_, err := f.Wait()
+				assert.ErrorContains(t, err, "scope: panic recovered: boom")
+				return nil
+			}, scope.WithSupervisor())
+
+			assert.ErrorContains(t, err, "scope: panic recovered: boom")
+		})
+	})
 
 	t.Run("goroutine error does not cancel sibling goroutines", func(t *testing.T) {
 		t.Parallel()
