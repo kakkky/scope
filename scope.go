@@ -13,6 +13,7 @@ import (
 var (
 	errCanceledOnSuccess = errors.New("scope: canceled on first success")
 	errBodyNotReturned   = errors.New("scope: body did not return normally")
+	errPanicRecovered    = errors.New("scope: panic recovered")
 )
 
 // Scope represents a structured concurrency scope.
@@ -98,7 +99,7 @@ func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[
 		var v T
 		defer func() {
 			if r := recover(); r != nil {
-				err = newPanicError(r)
+				err = newPanicRecoveredError(r)
 			}
 			future.resolve(v, err)
 		}()
@@ -140,18 +141,8 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 		panic("scope: misuse: Scope called outside scope lifetime")
 	}
 	s.cond.L.Unlock()
-
-	if err := run(s.ctx, body, opts...); err != nil {
-		if s.shouldDiscard(err) {
-			return
-		}
-		s.recordErr(err)
-		if !s.supervisor {
-			s.cancel(err)
-		}
-	} else if s.cancelOnSuccess {
-		s.cancel(errCanceledOnSuccess)
-	}
+	err := run(s.ctx, body, opts...)
+	s.handleChildError(err)
 }
 
 // run creates a new Scope, executes body, and waits for all spawned goroutines to finish.
@@ -271,54 +262,43 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error, onFnSkipped f
 		}
 		defer func() {
 			if r := recover(); r != nil {
-				err := newPanicError(r)
-				s.recordErr(err)
-				if !s.supervisor {
-					s.cancel(err)
-				}
-				return
+				s.handleChildError(newPanicRecoveredError(r))
 			}
 		}()
-
-		if err := fn(s.ctx); err != nil {
-			if s.shouldDiscard(err) {
-				return
-			}
-			s.recordErr(err)
-			if !s.supervisor {
-				s.cancel(err)
-			}
-		} else if s.cancelOnSuccess {
-			s.cancel(errCanceledOnSuccess)
-		}
+		err := fn(s.ctx)
+		s.handleChildError(err)
 	}()
 }
 
-// panicError is a panic recovered from a goroutine, distinguishable from
-// ordinary errors so that it is never discarded.
-type panicError struct {
-	value any
-	stack []byte
+// handleChildError reacts to the result of a child of s (a goroutine spawned
+// via Go or a child scope created via Scope) according to s's own options.
+// err is nil when the child succeeded.
+func (s *Scope) handleChildError(err error) {
+	switch {
+	case err == nil && s.cancelOnSuccess:
+		s.cancel(errCanceledOnSuccess)
+	case err == nil:
+		// A success needs no reaction without WithCancelOnSuccess.
+	case errors.Is(err, errPanicRecovered) && s.supervisor:
+		// Panics, which may arrive as errors via GoFuture or a child scope,
+		// are never discarded.
+		s.recordErr(err)
+	case errors.Is(err, errPanicRecovered):
+		s.recordErr(err)
+		s.cancel(err)
+	case s.cancelOnSuccess && errors.Is(context.Cause(s.ctx), errCanceledOnSuccess):
+		// Errors after a success-triggered cancellation are its consequences
+		// (typically ctx.Err()), so they are discarded.
+	case s.supervisor:
+		s.recordErr(err)
+	default:
+		s.recordErr(err)
+		s.cancel(err)
+	}
 }
 
-func (e *panicError) Error() string {
-	return fmt.Sprintf("scope: panic recovered: %v\n%s", e.value, e.stack)
-}
-
-func newPanicError(r any) error {
-	return &panicError{value: r, stack: debug.Stack()}
-}
-
-// shouldDiscard reports whether err should be discarded because
-// WithCancelOnSuccess has already canceled the scope. Such errors are treated
-// as consequences of the cancellation (typically ctx.Err()). Panics are never
-// discarded, including those that reach here as errors via GoFuture or a
-// child scope.
-func (s *Scope) shouldDiscard(err error) bool {
-	var pe *panicError
-	return s.cancelOnSuccess &&
-		errors.Is(context.Cause(s.ctx), errCanceledOnSuccess) &&
-		!errors.As(err, &pe)
+func newPanicRecoveredError(r any) error {
+	return fmt.Errorf("%w: %v\n%s", errPanicRecovered, r, debug.Stack())
 }
 
 // recordErr stores err according to the aggregation policy.
