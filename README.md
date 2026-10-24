@@ -107,6 +107,8 @@ func WithTimeout(d time.Duration) Option
 
 Cancels the scope's context after duration `d`. When the timeout fires, `Run` returns `context.DeadlineExceeded`. If an earlier deadline is already set on the parent context, that deadline takes precedence.
 
+If the context passed to `Run` has an earlier deadline, this timeout has no effect, and that deadline's error is not returned by `Run` unless something in the scope returns it. When the timeout fires, `context.Cause` of the scope's context is an error wrapping `context.DeadlineExceeded` (`ctx.Err()` is still `context.DeadlineExceeded`).
+
 #### `WithCancelOnSuccess`
 
 ```go
@@ -115,18 +117,35 @@ func WithCancelOnSuccess() Option
 
 Cancels the scope's context as soon as any goroutine or child scope returns a nil error, allowing sibling goroutines to observe `ctx.Done()` and exit early. Errors returned by goroutines or child scopes after this cancellation (typically `ctx.Err()`) are discarded; errors that occurred before it and errors returned by `body` are still returned by `Run`, and panics are never discarded by this option.
 
+### Errors and panics
+
+By default, `Run` returns only the first error (first-error-wins). With `WithErrAggregation`, it returns all errors joined via `errors.Join`. A recovered panic takes precedence over ordinary errors.
+
+| Situation | Effect on the scope | Returned by `Run` |
+|---|---|---|
+| A goroutine returns an error | Cancels the scope (not with `WithSupervisor`) | Yes |
+| A goroutine panics | Recovers it into an error `scope: panic recovered: <value>\n<stack>` and cancels the scope (not with `WithSupervisor`) | Yes, in preference to ordinary errors. For `GoFuture`, `Future.Wait` also returns it |
+| The scope's `body` returns an error | Cancels the scope, even with `WithSupervisor` | Yes |
+| The scope's `body` panics | Not recovered. Cancels the scope and waits for all its goroutines | No. The panic propagates to the caller of `Run` |
+| A goroutine in a child scope returns an error | The child scope records the error, cancels itself (not with `WithSupervisor` on the child scope), and returns the error. The parent scope records it and cancels itself (not with `WithSupervisor` on the parent scope) | Yes |
+| A goroutine in a child scope panics | The child scope recovers it into an error, records it, cancels itself (not with `WithSupervisor` on the child scope), and returns the error. The parent scope records it as a panic and cancels itself (not with `WithSupervisor` on the parent scope) | Yes, in preference to ordinary errors |
+| A child scope's `body` returns an error | The child scope records the error, cancels itself (even with `WithSupervisor` on the child scope), and returns the error. The parent scope records it and cancels itself (not with `WithSupervisor` on the parent scope) | Yes |
+| A child scope's `body` panics | Not recovered. The child scope cancels itself and waits for all its goroutines. The panic propagates to the parent scope's `body`, and the parent scope likewise cancels itself and waits for all its goroutines without recovering it | No. The panic propagates to the caller of `Run` |
+| A goroutine or child scope returns an error after a success-triggered cancellation by `WithCancelOnSuccess` | The error is not recorded, since it is typically `ctx.Err()` (`context.Canceled`) returned by a goroutine that stopped because of the cancellation | No, except for panics, which are recorded and returned |
+| The scope's own `WithTimeout` fires | Cancels the scope regardless of `WithSupervisor` | `context.DeadlineExceeded`, unless a panic was recovered |
+| The deadline of the context passed to `Run` comes first | The scope's context is cancelled as well | The deadline's error is not returned unless something in the scope returns it (a goroutine returning `ctx.Err()` makes `Run` return `context.DeadlineExceeded`) |
+
 ### Options and child scopes
 
-How options behave across a parent scope and a child scope created via `Scope.Scope`:
+Options apply only to the scope they are passed to and are not inherited by child scopes. From the parent scope's point of view, a child scope created via `Scope.Scope` is handled like a single goroutine (except that a panic in the child scope's `body` is not recovered and propagates to the parent scope's `body`). How the parent scope reacts to the child scope's result is determined by the parent scope's options; the child scope's options only determine what the child scope returns.
 
-- **Options apply only to the scope they are passed to.** They are not inherited by child scopes, and the options of a child scope never change how its parent behaves.
-- **A child scope is handled like a single goroutine from the parent's point of view.** The parent reacts to the child's result according to the parent's own options:
-  - `WithSupervisor` on the parent decides whether a failed child scope cancels the parent's context.
-  - `WithErrAggregation` on the parent decides whether the child's error is collected together with other errors.
-  - `WithCancelOnSuccess` on the parent treats a child scope that returns without error as a success.
-- **The options of a child scope only determine what the child returns**, such as a joined error under `WithErrAggregation` or `context.DeadlineExceeded` under `WithTimeout`.
-- **Cancellation flows from parent to child only.** Cancelling a scope cancels all of its descendants through the context, while a child affects its parent only through the result it returns. In particular, `WithTimeout` on the parent bounds all of its descendants; `WithTimeout` on a child can only shorten the deadline within that bound.
-- **`WithMaxConcurrency` counts only goroutines spawned via `Go` on that scope.** A child scope runs synchronously in the caller's goroutine and does not occupy a slot of its parent's limit.
+| Option | Passed to the parent scope | Passed to the child scope |
+|---|---|---|
+| `WithSupervisor` | A child scope returning an error does not cancel the parent scope | Sibling goroutines in the child scope are not cancelled. The parent scope is still cancelled unless it is a supervisor itself |
+| `WithErrAggregation` | The child scope's error is collected together with other errors | The child scope returns all of its errors joined |
+| `WithCancelOnSuccess` | A child scope returning without error counts as a success and cancels the parent scope | A success inside the child scope cancels only the child scope |
+| `WithTimeout` | Bounds the deadline of all descendants | Can only shorten the deadline within the parent scope's bound. When it fires, the child scope returns `context.DeadlineExceeded` as an error |
+| `WithMaxConcurrency` | A child scope does not occupy a slot of the parent scope | Limits only goroutines spawned via `Go` on the child scope |
 
 ## Background
 

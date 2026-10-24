@@ -35,6 +35,9 @@ type Scope struct {
 	errOnce sync.Once
 	err     error
 
+	panicOnce sync.Once
+	panicErr  error
+
 	supervisor bool
 
 	errAggregation bool
@@ -59,7 +62,9 @@ type Scope struct {
 // error is returned. If any spawned goroutine returns a non-nil error or
 // panics, the scope's context is canceled and the first such error is
 // returned. Panics from spawned goroutines are recovered and converted into
-// errors; they do not crash the process.
+// errors; they do not crash the process. A recovered panic takes precedence
+// over ordinary errors: if any goroutine panicked, Run returns the first panic
+// instead of the first error.
 //
 // The context passed to body and to each spawned goroutine is derived from
 // parent and is canceled as described above. Callers should observe this
@@ -152,12 +157,15 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		opt(o)
 	}
 
-	var timeoutCtx context.Context
+	// ownScopeTimeoutCause is allocated per scope so that the timeout of a
+	// parent or a child scope, which also wraps DeadlineExceeded, is never
+	// mistaken for this scope's own.
+	var ownScopeTimeoutCause error
 	if o.timeout > 0 {
+		ownScopeTimeoutCause = fmt.Errorf("scope: timeout of %v exceeded: %w", o.timeout, context.DeadlineExceeded)
 		var timeoutCancel context.CancelFunc
-		timeoutCtx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
+		ctx, timeoutCancel = context.WithTimeoutCause(ctx, o.timeout, ownScopeTimeoutCause)
 		defer timeoutCancel()
-		ctx = timeoutCtx
 	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -198,16 +206,15 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	s.waitAndClose()
 
-	cause := context.Cause(s.ctx)
+	ownScopeTimedOut := ownScopeTimeoutCause != nil && context.Cause(s.ctx) == ownScopeTimeoutCause
 	switch {
-	// A child scope that timed out also cancels s with DeadlineExceeded, so
-	// check that this scope's own deadline has actually passed.
-	case timeoutCtx != nil && errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) &&
-		errors.Is(cause, context.DeadlineExceeded):
+	case s.panicErr != nil:
+		return s.panicErr
+	case ownScopeTimedOut:
 		if s.errAggregation {
-			return errors.Join(append(s.errs, cause)...)
+			return errors.Join(append(s.errs, context.DeadlineExceeded)...)
 		}
-		return cause
+		return context.DeadlineExceeded
 	case s.errAggregation:
 		return errors.Join(s.errs...)
 	default:
@@ -287,8 +294,9 @@ func (s *Scope) handleChildError(err error) {
 		s.recordErr(err)
 		s.cancel(err)
 	case s.cancelOnSuccess && errors.Is(context.Cause(s.ctx), errCanceledOnSuccess):
-		// Errors after a success-triggered cancellation are its consequences
-		// (typically ctx.Err()), so they are discarded.
+		// Errors after a success-triggered cancellation are discarded: they are
+		// typically ctx.Err() returned by goroutines that stopped because of
+		// the cancellation, not real failures.
 	case s.supervisor:
 		s.recordErr(err)
 	default:
@@ -303,15 +311,21 @@ func newPanicRecoveredError(r any) error {
 
 // recordErr stores err according to the aggregation policy.
 // In aggregation mode, all errors are collected for errors.Join at the end of Run.
-// Otherwise, only the first error is kept via errOnce.
+// Otherwise, only the first error is kept via errOnce, and the first recovered
+// panic is kept separately via panicOnce so that it takes precedence.
 func (s *Scope) recordErr(err error) {
 	if s.errAggregation {
 		s.errsMu.Lock()
 		s.errs = append(s.errs, err)
 		s.errsMu.Unlock()
-	} else {
-		s.errOnce.Do(func() {
-			s.err = err
+		return
+	}
+	s.errOnce.Do(func() {
+		s.err = err
+	})
+	if errors.Is(err, errPanicRecovered) {
+		s.panicOnce.Do(func() {
+			s.panicErr = err
 		})
 	}
 }

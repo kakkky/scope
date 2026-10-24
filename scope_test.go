@@ -811,6 +811,64 @@ func TestRun_PanicAfterCancelOnSuccess(t *testing.T) {
 	}
 }
 
+func TestRun_PanicPriority(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body func(s *scope.Scope) error
+		opts []scope.Option
+	}{
+		{
+			name: "panic after an ordinary error is returned in preference to it",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return assert.AnError })
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+		},
+		{
+			name: "child scope: panic after an ordinary error in the child is returned in preference to it",
+			body: func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error { return assert.AnError })
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						panic("boom")
+					})
+					return nil
+				})
+				return nil
+			},
+		},
+		{
+			name: "panic after the scope's own timeout is returned in preference to DeadlineExceeded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+			opts: []scope.Option{scope.WithTimeout(1 * time.Second)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				err := scope.Run(t.Context(), tt.body, tt.opts...)
+				assert.ErrorContains(t, err, "scope: panic recovered: boom")
+			})
+		})
+	}
+}
+
 func TestRun_Cancel(t *testing.T) {
 	t.Parallel()
 
@@ -1041,6 +1099,19 @@ func TestRun_CancellationCause(t *testing.T) {
 			},
 			opts:      []scope.Option{scope.WithSupervisor()},
 			wantCause: "",
+		},
+		{
+			name: "timeout sets a cause wrapping DeadlineExceeded",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					*cause = context.Cause(ctx)
+					return nil
+				})
+				return nil
+			},
+			opts:      []scope.Option{scope.WithTimeout(10 * time.Millisecond)},
+			wantCause: "scope: timeout of 10ms exceeded: context deadline exceeded",
 		},
 		{
 			name: "supervisor: child scope error does not cancel parent so cause is nil",
@@ -1623,6 +1694,44 @@ func TestRun_WithTimeout(t *testing.T) {
 			}, scope.WithTimeout(1*time.Hour), scope.WithErrAggregation())
 
 			assert.EqualError(t, err, context.DeadlineExceeded.Error())
+		})
+	})
+
+	t.Run("parent timeout fires before child timeout with errAggregation: DeadlineExceeded is not duplicated", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			err := scope.Run(context.Background(), func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(1*time.Hour))
+				return nil
+			}, scope.WithTimeout(1*time.Second), scope.WithErrAggregation())
+
+			assert.EqualError(t, err, context.DeadlineExceeded.Error())
+		})
+	})
+
+	t.Run("deadline of the context passed to Run is not mistaken for the scope's own timeout", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+
+			err := scope.Run(ctx, func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					return nil
+				})
+				return nil
+			}, scope.WithTimeout(1*time.Hour))
+
+			assert.NoError(t, err)
 		})
 	})
 }
