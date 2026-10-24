@@ -61,7 +61,7 @@ Spawns `fn` in a new goroutine bound to the scope. `fn` receives the scope's con
 func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[T]
 ```
 
-Spawns `fn` in a new goroutine and returns a `Future[T]` to retrieve the result. `future.Wait()` blocks until the value is available or the scope's context is cancelled.
+Spawns `fn` in a new goroutine and returns a `Future[T]` to retrieve the result. `future.Wait()` blocks until `fn` has finished and returns the value and error returned by `fn` (or an error describing a panic). It can be called any number of times, from any goroutine, including after `Run` has returned.
 
 ### `Scope.Scope`
 
