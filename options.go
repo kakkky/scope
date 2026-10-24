@@ -17,7 +17,13 @@ type options struct {
 // WithSupervisor returns an Option that enables supervisor mode for the scope.
 //
 // In supervisor mode, a failure in one goroutine or child scope does not
-// cancel the context of sibling goroutines or the parent scope.
+// cancel the scope's context, so sibling goroutines and child scopes keep
+// running.
+//
+// Whether a failed child scope created via Scope.Scope cancels its parent is
+// determined by the parent's mode only. WithSupervisor passed to the child
+// affects only goroutines within the child; a failure in it still cancels a
+// parent that is not in supervisor mode.
 //
 // Note that a non-nil error returned directly from the body function still
 // cancels the scope's context regardless of this option.

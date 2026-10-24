@@ -134,11 +134,6 @@ func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[
 // Calling Scope after Run has returned panics, matching the behavior of
 // Scope.Go.
 func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
-	o := &options{}
-	for _, opt := range opts {
-		opt(o)
-	}
-
 	s.cond.L.Lock()
 	if s.closed {
 		s.cond.L.Unlock()
@@ -148,7 +143,7 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 
 	if err := run(s.ctx, body, opts...); err != nil {
 		s.recordErr(err)
-		if !o.supervisor {
+		if !s.supervisor {
 			s.cancel(err)
 		}
 	}

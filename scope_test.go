@@ -943,6 +943,24 @@ func TestRun_CancellationCause(t *testing.T) {
 			opts:      []scope.Option{scope.WithSupervisor()},
 			wantCause: "",
 		},
+		{
+			name: "supervisor: child scope error does not cancel parent so cause is nil",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						return assert.AnError
+					})
+					return nil
+				})
+				s.Go(func(ctx context.Context) error {
+					*cause = context.Cause(ctx)
+					return nil
+				})
+				return nil
+			},
+			opts:      []scope.Option{scope.WithSupervisor()},
+			wantCause: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1125,7 +1143,7 @@ func TestRun_WithSupervisor(t *testing.T) {
 		assert.True(t, observed.Load(), "goroutine should have been cancelled by body error")
 	})
 
-	t.Run("child scope goroutine error does not cancel sibling or parent goroutines", func(t *testing.T) {
+	t.Run("supervisor child scope: goroutine error does not cancel siblings in the child but cancels the parent", func(t *testing.T) {
 		t.Parallel()
 
 		ch1 := make(chan struct{})
@@ -1156,7 +1174,7 @@ func TestRun_WithSupervisor(t *testing.T) {
 
 		assert.ErrorIs(t, err, assert.AnError)
 		assert.True(t, siblingObserved.Load(), "sibling goroutine within child scope should not have been cancelled")
-		assert.True(t, parentObserved.Load(), "parent goroutine should not have been cancelled")
+		assert.False(t, parentObserved.Load(), "non-supervisor parent should have been cancelled")
 	})
 
 }

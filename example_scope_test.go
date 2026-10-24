@@ -341,8 +341,9 @@ func ExampleScope_Scope_errorCancelsContext() {
 	// err: child scope failed
 }
 
-// In supervisor mode, goroutine failures within a child scope do not cancel
-// sibling goroutines inside that scope, nor goroutines in the parent scope.
+// WithSupervisor on a child scope only affects goroutines within that scope:
+// sibling goroutines inside it are not canceled, but the failure still
+// cancels a parent that is not in supervisor mode.
 func ExampleScope_Scope_errorOccuredFromGoWithSupervisor() {
 	ctx := context.Background()
 	ch1 := make(chan struct{})
@@ -371,7 +372,7 @@ func ExampleScope_Scope_errorOccuredFromGoWithSupervisor() {
 
 	// Output:
 	// sibling ctx cancelled: false
-	// parent level goroutine ctx cancelled: false
+	// parent level goroutine ctx cancelled: true
 	// err: task failed
 }
 
