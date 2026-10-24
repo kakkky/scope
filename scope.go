@@ -10,7 +10,10 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-var errCanceledOnSuccess = errors.New("scope: canceled on first success")
+var (
+	errCanceledOnSuccess = errors.New("scope: canceled on first success")
+	errBodyNotReturned   = errors.New("scope: body did not return normally")
+)
 
 // Scope represents a structured concurrency scope.
 //
@@ -47,7 +50,9 @@ type Scope struct {
 //
 // Run guarantees that every goroutine spawned through the Scope has returned
 // by the time Run returns, regardless of whether body returns normally,
-// returns an error, or panics.
+// returns an error, or panics. A panic in body is not recovered: the scope's
+// context is canceled, Run waits for all spawned goroutines, and then the
+// panic continues to propagate to the caller.
 //
 // If body returns a non-nil error, the scope's context is canceled and the
 // error is returned. If any spawned goroutine returns a non-nil error or
@@ -179,19 +184,26 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	defer s.cancel(nil)
 
+	// bodyReturned detects an abnormal exit from body (panic or runtime.Goexit)
+	// so that spawned goroutines are still waited for. recover is not used
+	// because it cannot detect runtime.Goexit (e.g. t.FailNow in body).
+	var bodyReturned bool
+	defer func() {
+		if !bodyReturned {
+			s.cancel(errBodyNotReturned)
+			s.waitAndClose()
+		}
+	}()
+
 	err := body(s)
+	bodyReturned = true
 
 	if err != nil {
 		s.recordErr(err)
 		s.cancel(err)
 	}
 
-	s.cond.L.Lock()
-	for s.activeG > 0 {
-		s.cond.Wait()
-	}
-	s.closed = true
-	s.cond.L.Unlock()
+	s.waitAndClose()
 
 	cause := context.Cause(s.ctx)
 	switch {
@@ -207,6 +219,17 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	default:
 		return s.err
 	}
+}
+
+// waitAndClose blocks until every spawned goroutine has finished and then
+// closes the scope.
+func (s *Scope) waitAndClose() {
+	s.cond.L.Lock()
+	for s.activeG > 0 {
+		s.cond.Wait()
+	}
+	s.closed = true
+	s.cond.L.Unlock()
 }
 
 // spawnGoroutine runs fn in a new goroutine registered on the scope.
