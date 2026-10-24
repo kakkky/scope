@@ -17,7 +17,13 @@ type options struct {
 // WithSupervisor returns an Option that enables supervisor mode for the scope.
 //
 // In supervisor mode, a failure in one goroutine or child scope does not
-// cancel the context of sibling goroutines or the parent scope.
+// cancel the scope's context, so sibling goroutines and child scopes keep
+// running.
+//
+// Whether a failed child scope created via Scope.Scope cancels its parent is
+// determined by the parent's mode only. WithSupervisor passed to the child
+// affects only goroutines within the child; a failure in it still cancels a
+// parent that is not in supervisor mode.
 //
 // Note that a non-nil error returned directly from the body function still
 // cancels the scope's context regardless of this option.
@@ -91,13 +97,19 @@ func WithTimeout(d time.Duration) Option {
 // WithCancelOnSuccess returns an Option that cancels the scope's context as soon
 // as any spawned goroutine returns a nil error.
 //
+// A child scope created via Scope.Scope counts as a success when it returns
+// without error, in the same way as a goroutine spawned via Go.
+//
 // By default, the scope's context is only canceled when a goroutine returns a
 // non-nil error. With this option, a successful return also triggers
 // cancellation, allowing sibling goroutines to observe ctx.Done() and exit
 // early.
 //
-// Run returns nil when this option triggers the cancellation, even if
-// other goroutines subsequently return ctx.Err().
+// Errors returned by goroutines or child scopes after this option has
+// triggered the cancellation are discarded, since they are typically ctx.Err().
+// Errors recorded before the cancellation and errors returned by the body
+// function are still returned by Run, and panics are never discarded by this
+// option.
 //
 // This option is not inherited by child scopes created via Scope.Scope;
 // each scope must opt in independently. Cancellation, however, propagates to

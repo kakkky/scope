@@ -214,6 +214,27 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 11,
 		},
+		{
+			name: "WithCancelOnSuccess: child scope success cancels parent",
+			opts: []scope.Option{scope.WithCancelOnSuccess()},
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						count.Add(1)
+						return nil
+					})
+					return nil
+				})
+				s.Go(func(ctx context.Context) error {
+					if ctx.Err() == nil {
+						count.Add(10)
+					}
+					return nil
+				})
+				return nil
+			},
+			wantCount: 1,
+		},
 		// GoFuture
 		{
 			name: "GoFuture: returns value produced by goroutine",
@@ -680,6 +701,27 @@ func TestRun_Error(t *testing.T) {
 			opts:     []scope.Option{scope.WithSupervisor(), scope.WithErrAggregation()},
 			wantErrs: []error{errA, errB, errC},
 		},
+		{
+			name: "WithCancelOnSuccess: body error returned after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				time.Sleep(time.Second)
+				return errA
+			},
+			opts:     []scope.Option{scope.WithCancelOnSuccess()},
+			wantErrs: []error{errA},
+		},
+		{
+			name: "WithCancelOnSuccess+WithSupervisor: error recorded before a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return errA })
+				time.Sleep(time.Second)
+				s.Go(func(ctx context.Context) error { return nil })
+				return nil
+			},
+			opts:     []scope.Option{scope.WithCancelOnSuccess(), scope.WithSupervisor()},
+			wantErrs: []error{errA},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -710,6 +752,63 @@ func TestRun_Error(t *testing.T) {
 		isB := errors.Is(err, errB)
 		assert.True(t, isA != isB, "only one of errA or errB should propagate, not both")
 	})
+}
+
+func TestRun_PanicAfterCancelOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body func(s *scope.Scope) error
+	}{
+		{
+			name: "Go: panic after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+		},
+		{
+			name: "GoFuture: panic after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				s.GoFuture(func(ctx context.Context) (int, error) {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+		},
+		{
+			name: "child scope: panic in a child goroutine after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						panic("boom")
+					})
+					return nil
+				})
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				err := scope.Run(t.Context(), tt.body, scope.WithCancelOnSuccess())
+				assert.ErrorContains(t, err, "scope: panic recovered: boom")
+			})
+		})
+	}
 }
 
 func TestRun_Cancel(t *testing.T) {
@@ -943,6 +1042,24 @@ func TestRun_CancellationCause(t *testing.T) {
 			opts:      []scope.Option{scope.WithSupervisor()},
 			wantCause: "",
 		},
+		{
+			name: "supervisor: child scope error does not cancel parent so cause is nil",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						return assert.AnError
+					})
+					return nil
+				})
+				s.Go(func(ctx context.Context) error {
+					*cause = context.Cause(ctx)
+					return nil
+				})
+				return nil
+			},
+			opts:      []scope.Option{scope.WithSupervisor()},
+			wantCause: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1125,7 +1242,7 @@ func TestRun_WithSupervisor(t *testing.T) {
 		assert.True(t, observed.Load(), "goroutine should have been cancelled by body error")
 	})
 
-	t.Run("child scope goroutine error does not cancel sibling or parent goroutines", func(t *testing.T) {
+	t.Run("supervisor child scope: goroutine error does not cancel siblings in the child but cancels the parent", func(t *testing.T) {
 		t.Parallel()
 
 		ch1 := make(chan struct{})
@@ -1156,7 +1273,7 @@ func TestRun_WithSupervisor(t *testing.T) {
 
 		assert.ErrorIs(t, err, assert.AnError)
 		assert.True(t, siblingObserved.Load(), "sibling goroutine within child scope should not have been cancelled")
-		assert.True(t, parentObserved.Load(), "parent goroutine should not have been cancelled")
+		assert.False(t, parentObserved.Load(), "non-supervisor parent should have been cancelled")
 	})
 
 }
@@ -1487,6 +1604,25 @@ func TestRun_WithTimeout(t *testing.T) {
 
 			assert.ErrorIs(t, err, assert.AnError)
 			assert.ErrorIs(t, err, context.DeadlineExceeded)
+		})
+	})
+
+	t.Run("child timeout fires with parent timeout and errAggregation: DeadlineExceeded is not duplicated", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			err := scope.Run(context.Background(), func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(1*time.Second))
+				return nil
+			}, scope.WithTimeout(1*time.Hour), scope.WithErrAggregation())
+
+			assert.EqualError(t, err, context.DeadlineExceeded.Error())
 		})
 	})
 }

@@ -134,11 +134,6 @@ func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[
 // Calling Scope after Run has returned panics, matching the behavior of
 // Scope.Go.
 func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
-	o := &options{}
-	for _, opt := range opts {
-		opt(o)
-	}
-
 	s.cond.L.Lock()
 	if s.closed {
 		s.cond.L.Unlock()
@@ -147,10 +142,15 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	s.cond.L.Unlock()
 
 	if err := run(s.ctx, body, opts...); err != nil {
+		if s.shouldDiscard(err) {
+			return
+		}
 		s.recordErr(err)
-		if !o.supervisor {
+		if !s.supervisor {
 			s.cancel(err)
 		}
+	} else if s.cancelOnSuccess {
+		s.cancel(errCanceledOnSuccess)
 	}
 }
 
@@ -161,10 +161,12 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		opt(o)
 	}
 
+	var timeoutCtx context.Context
 	if o.timeout > 0 {
 		var timeoutCancel context.CancelFunc
-		ctx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
+		timeoutCtx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
 		defer timeoutCancel()
+		ctx = timeoutCtx
 	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -207,13 +209,14 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	cause := context.Cause(s.ctx)
 	switch {
-	case o.timeout > 0 && errors.Is(cause, context.DeadlineExceeded):
+	// A child scope that timed out also cancels s with DeadlineExceeded, so
+	// check that this scope's own deadline has actually passed.
+	case timeoutCtx != nil && errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) &&
+		errors.Is(cause, context.DeadlineExceeded):
 		if s.errAggregation {
 			return errors.Join(append(s.errs, cause)...)
 		}
 		return cause
-	case o.cancelOnSuccess && errors.Is(cause, errCanceledOnSuccess):
-		return nil
 	case s.errAggregation:
 		return errors.Join(s.errs...)
 	default:
@@ -278,6 +281,9 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error, onFnSkipped f
 		}()
 
 		if err := fn(s.ctx); err != nil {
+			if s.shouldDiscard(err) {
+				return
+			}
 			s.recordErr(err)
 			if !s.supervisor {
 				s.cancel(err)
@@ -288,8 +294,31 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error, onFnSkipped f
 	}()
 }
 
+// panicError is a panic recovered from a goroutine, distinguishable from
+// ordinary errors so that it is never discarded.
+type panicError struct {
+	value any
+	stack []byte
+}
+
+func (e *panicError) Error() string {
+	return fmt.Sprintf("scope: panic recovered: %v\n%s", e.value, e.stack)
+}
+
 func newPanicError(r any) error {
-	return fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
+	return &panicError{value: r, stack: debug.Stack()}
+}
+
+// shouldDiscard reports whether err should be discarded because
+// WithCancelOnSuccess has already canceled the scope. Such errors are treated
+// as consequences of the cancellation (typically ctx.Err()). Panics are never
+// discarded, including those that reach here as errors via GoFuture or a
+// child scope.
+func (s *Scope) shouldDiscard(err error) bool {
+	var pe *panicError
+	return s.cancelOnSuccess &&
+		errors.Is(context.Cause(s.ctx), errCanceledOnSuccess) &&
+		!errors.As(err, &pe)
 }
 
 // recordErr stores err according to the aggregation policy.
