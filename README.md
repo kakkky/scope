@@ -113,7 +113,7 @@ Cancels the scope's context after duration `d`. When the timeout fires, `Run` re
 func WithCancelOnSuccess() Option
 ```
 
-Cancels the scope's context as soon as any goroutine returns a nil error, allowing sibling goroutines to observe `ctx.Done()` and exit early. `Run` returns nil when this option triggers the cancellation.
+Cancels the scope's context as soon as any goroutine or child scope returns a nil error, allowing sibling goroutines to observe `ctx.Done()` and exit early. `Run` returns nil when this option triggers the cancellation.
 
 ## Background
 
