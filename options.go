@@ -80,8 +80,12 @@ func WithMaxConcurrency(max int) Option {
 // visible via ctx.Deadline() within the scope's goroutines, allowing downstream
 // context-aware operations (e.g. HTTP clients) to observe the remaining time.
 //
+// The cause of the scope's context, as reported by context.Cause, is an error
+// wrapping context.DeadlineExceeded.
+//
 // If an earlier deadline is already set on the context, that deadline takes
-// precedence and this timeout has no additional effect.
+// precedence and this timeout has no additional effect: Run returns the errors
+// recorded in the scope, as if this option were not given.
 //
 // A timeout always cancels the scope's context regardless of WithSupervisor.
 //

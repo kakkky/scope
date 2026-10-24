@@ -1101,6 +1101,19 @@ func TestRun_CancellationCause(t *testing.T) {
 			wantCause: "",
 		},
 		{
+			name: "timeout sets a cause wrapping DeadlineExceeded",
+			body: func(s *scope.Scope, cause *error) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					*cause = context.Cause(ctx)
+					return nil
+				})
+				return nil
+			},
+			opts:      []scope.Option{scope.WithTimeout(10 * time.Millisecond)},
+			wantCause: "scope: timeout of 10ms exceeded: context deadline exceeded",
+		},
+		{
 			name: "supervisor: child scope error does not cancel parent so cause is nil",
 			body: func(s *scope.Scope, cause *error) error {
 				s.Scope(func(child *scope.Scope) error {
@@ -1681,6 +1694,44 @@ func TestRun_WithTimeout(t *testing.T) {
 			}, scope.WithTimeout(1*time.Hour), scope.WithErrAggregation())
 
 			assert.EqualError(t, err, context.DeadlineExceeded.Error())
+		})
+	})
+
+	t.Run("parent timeout fires before child timeout with errAggregation: DeadlineExceeded is not duplicated", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			err := scope.Run(context.Background(), func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(1*time.Hour))
+				return nil
+			}, scope.WithTimeout(1*time.Second), scope.WithErrAggregation())
+
+			assert.EqualError(t, err, context.DeadlineExceeded.Error())
+		})
+	})
+
+	t.Run("earlier deadline on the parent context: the timeout has no effect", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+
+			err := scope.Run(ctx, func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					return nil
+				})
+				return nil
+			}, scope.WithTimeout(1*time.Hour))
+
+			assert.NoError(t, err)
 		})
 	})
 }

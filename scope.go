@@ -157,12 +157,15 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		opt(o)
 	}
 
-	var timeoutCtx context.Context
+	// ownScopeTimeoutCause is allocated per scope so that the timeout of a
+	// parent or a child scope, which also wraps DeadlineExceeded, is never
+	// mistaken for this scope's own.
+	var ownScopeTimeoutCause error
 	if o.timeout > 0 {
+		ownScopeTimeoutCause = fmt.Errorf("scope: timeout of %v exceeded: %w", o.timeout, context.DeadlineExceeded)
 		var timeoutCancel context.CancelFunc
-		timeoutCtx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
+		ctx, timeoutCancel = context.WithTimeoutCause(ctx, o.timeout, ownScopeTimeoutCause)
 		defer timeoutCancel()
-		ctx = timeoutCtx
 	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -203,18 +206,15 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	s.waitAndClose()
 
-	cause := context.Cause(s.ctx)
+	ownScopeTimedOut := ownScopeTimeoutCause != nil && context.Cause(s.ctx) == ownScopeTimeoutCause
 	switch {
 	case s.panicErr != nil:
 		return s.panicErr
-	// A child scope that timed out also cancels s with DeadlineExceeded, so
-	// check that this scope's own deadline has actually passed.
-	case timeoutCtx != nil && errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) &&
-		errors.Is(cause, context.DeadlineExceeded):
+	case ownScopeTimedOut:
 		if s.errAggregation {
-			return errors.Join(append(s.errs, cause)...)
+			return errors.Join(append(s.errs, context.DeadlineExceeded)...)
 		}
-		return cause
+		return context.DeadlineExceeded
 	case s.errAggregation:
 		return errors.Join(s.errs...)
 	default:
