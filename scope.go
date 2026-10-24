@@ -35,6 +35,9 @@ type Scope struct {
 	errOnce sync.Once
 	err     error
 
+	panicOnce sync.Once
+	panicErr  error
+
 	supervisor bool
 
 	errAggregation bool
@@ -59,7 +62,9 @@ type Scope struct {
 // error is returned. If any spawned goroutine returns a non-nil error or
 // panics, the scope's context is canceled and the first such error is
 // returned. Panics from spawned goroutines are recovered and converted into
-// errors; they do not crash the process.
+// errors; they do not crash the process. A recovered panic takes precedence
+// over ordinary errors: if any goroutine panicked, Run returns the first panic
+// instead of the first error.
 //
 // The context passed to body and to each spawned goroutine is derived from
 // parent and is canceled as described above. Callers should observe this
@@ -200,6 +205,8 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	cause := context.Cause(s.ctx)
 	switch {
+	case s.panicErr != nil:
+		return s.panicErr
 	// A child scope that timed out also cancels s with DeadlineExceeded, so
 	// check that this scope's own deadline has actually passed.
 	case timeoutCtx != nil && errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) &&
@@ -303,15 +310,21 @@ func newPanicRecoveredError(r any) error {
 
 // recordErr stores err according to the aggregation policy.
 // In aggregation mode, all errors are collected for errors.Join at the end of Run.
-// Otherwise, only the first error is kept via errOnce.
+// Otherwise, only the first error is kept via errOnce, and the first recovered
+// panic is kept separately via panicOnce so that it takes precedence.
 func (s *Scope) recordErr(err error) {
 	if s.errAggregation {
 		s.errsMu.Lock()
 		s.errs = append(s.errs, err)
 		s.errsMu.Unlock()
-	} else {
-		s.errOnce.Do(func() {
-			s.err = err
+		return
+	}
+	s.errOnce.Do(func() {
+		s.err = err
+	})
+	if errors.Is(err, errPanicRecovered) {
+		s.panicOnce.Do(func() {
+			s.panicErr = err
 		})
 	}
 }

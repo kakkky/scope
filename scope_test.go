@@ -811,6 +811,64 @@ func TestRun_PanicAfterCancelOnSuccess(t *testing.T) {
 	}
 }
 
+func TestRun_PanicPriority(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body func(s *scope.Scope) error
+		opts []scope.Option
+	}{
+		{
+			name: "panic after an ordinary error is returned in preference to it",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return assert.AnError })
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+		},
+		{
+			name: "child scope: panic after an ordinary error in the child is returned in preference to it",
+			body: func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error { return assert.AnError })
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						panic("boom")
+					})
+					return nil
+				})
+				return nil
+			},
+		},
+		{
+			name: "panic after the scope's own timeout is returned in preference to DeadlineExceeded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+			opts: []scope.Option{scope.WithTimeout(1 * time.Second)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				err := scope.Run(t.Context(), tt.body, tt.opts...)
+				assert.ErrorContains(t, err, "scope: panic recovered: boom")
+			})
+		})
+	}
+}
+
 func TestRun_Cancel(t *testing.T) {
 	t.Parallel()
 
