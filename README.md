@@ -81,7 +81,7 @@ Options are passed to `Run` or `Scope.Scope` to configure the scope. Each scope 
 func WithSupervisor() Option
 ```
 
-In supervisor mode, a failure in one goroutine does not cancel the context of sibling goroutines. Each goroutine runs to completion regardless of others' results.
+In supervisor mode, a failure in one goroutine or child scope does not cancel the scope's context, so siblings keep running. Whether a failed child scope cancels its parent is determined by the parent's mode only. Each goroutine runs to completion regardless of others' results.
 
 #### `WithErrAggregation`
 
