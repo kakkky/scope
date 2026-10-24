@@ -161,10 +161,12 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		opt(o)
 	}
 
+	var timeoutCtx context.Context
 	if o.timeout > 0 {
 		var timeoutCancel context.CancelFunc
-		ctx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
+		timeoutCtx, timeoutCancel = context.WithTimeout(ctx, o.timeout)
 		defer timeoutCancel()
+		ctx = timeoutCtx
 	}
 
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -207,7 +209,10 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	cause := context.Cause(s.ctx)
 	switch {
-	case o.timeout > 0 && errors.Is(cause, context.DeadlineExceeded):
+	// A child scope that timed out also cancels s with DeadlineExceeded, so
+	// check that this scope's own deadline has actually passed.
+	case timeoutCtx != nil && errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) &&
+		errors.Is(cause, context.DeadlineExceeded):
 		if s.errAggregation {
 			return errors.Join(append(s.errs, cause)...)
 		}

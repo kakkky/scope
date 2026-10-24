@@ -1606,4 +1606,23 @@ func TestRun_WithTimeout(t *testing.T) {
 			assert.ErrorIs(t, err, context.DeadlineExceeded)
 		})
 	})
+
+	t.Run("child timeout fires with parent timeout and errAggregation: DeadlineExceeded is not duplicated", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			err := scope.Run(context.Background(), func(s *scope.Scope) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						return nil
+					})
+					return nil
+				}, scope.WithTimeout(1*time.Second))
+				return nil
+			}, scope.WithTimeout(1*time.Hour), scope.WithErrAggregation())
+
+			assert.EqualError(t, err, context.DeadlineExceeded.Error())
+		})
+	})
 }
