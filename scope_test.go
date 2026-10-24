@@ -314,12 +314,15 @@ func TestRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var count atomic.Int64
-			err := scope.Run(context.Background(), func(s *scope.Scope) error {
-				return tt.body(s, &count)
-			}, tt.opts...)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.wantCount, count.Load())
+
+			synctest.Test(t, func(t *testing.T) {
+				var count atomic.Int64
+				err := scope.Run(context.Background(), func(s *scope.Scope) error {
+					return tt.body(s, &count)
+				}, tt.opts...)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantCount, count.Load())
+			})
 		})
 	}
 }
@@ -553,10 +556,12 @@ func TestRun_Error(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := scope.Run(t.Context(), tt.body, tt.opts...)
-			for _, wantErr := range tt.wantErrs {
-				assert.ErrorIs(t, err, wantErr)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				err := scope.Run(t.Context(), tt.body, tt.opts...)
+				for _, wantErr := range tt.wantErrs {
+					assert.ErrorIs(t, err, wantErr)
+				}
+			})
 		})
 	}
 
