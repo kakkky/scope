@@ -546,7 +546,9 @@ func TestRun_Error(t *testing.T) {
 					time.Sleep(1 * time.Second)
 					return assert.AnError
 				})
-				// blocks on the semaphore until the first goroutine cancels the scope
+				// ensure the first goroutine holds the only slot
+				synctest.Wait()
+				// waits for a slot until the first goroutine cancels the scope
 				var fnRan atomic.Bool
 				f := s.GoFuture(func(ctx context.Context) (int, error) {
 					fnRan.Store(true)
@@ -903,6 +905,7 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		opts      []scope.Option
 		call      func(s *scope.Scope)
 		wantPanic string
 	}{
@@ -920,6 +923,22 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 			},
 			wantPanic: "scope: misuse: Scope called outside scope lifetime",
 		},
+		{
+			name: "Go panics when called after Run returned with WithMaxConcurrency",
+			opts: []scope.Option{scope.WithMaxConcurrency(1)},
+			call: func(s *scope.Scope) {
+				s.Go(func(ctx context.Context) error { return nil })
+			},
+			wantPanic: "scope: misuse: Go called outside scope lifetime",
+		},
+		{
+			name: "GoFuture panics when called after Run returned with WithMaxConcurrency",
+			opts: []scope.Option{scope.WithMaxConcurrency(1)},
+			call: func(s *scope.Scope) {
+				s.GoFuture(func(ctx context.Context) (int, error) { return 0, nil })
+			},
+			wantPanic: "scope: misuse: Go called outside scope lifetime",
+		},
 	}
 
 	for _, tt := range tests {
@@ -930,7 +949,7 @@ func TestRun_CallMethodOutsideScopeLifetime(t *testing.T) {
 			err := scope.Run(t.Context(), func(s *scope.Scope) error {
 				captured = s
 				return nil
-			})
+			}, tt.opts...)
 			assert.NoError(t, err)
 			assert.PanicsWithValue(t, tt.wantPanic, func() {
 				tt.call(captured)
@@ -1120,6 +1139,18 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 			},
 			wantPeakMax: 2,
 		},
+		{
+			name: "recursive Go from a goroutine holding the only slot does not deadlock",
+			opts: []scope.Option{scope.WithMaxConcurrency(1)},
+			body: func(s *scope.Scope, trackFn func(ctx context.Context) error) error {
+				s.Go(func(ctx context.Context) error {
+					s.Go(trackFn)
+					return nil
+				})
+				return nil
+			},
+			wantPeakMax: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1166,6 +1197,8 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 				s.Go(func(ctx context.Context) error {
 					panic("boom")
 				})
+				// ensure the first goroutine has panicked and released its slot
+				synctest.Wait()
 				s.Go(func(ctx context.Context) error {
 					reached.Store(true)
 					return nil
@@ -1190,6 +1223,8 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 					time.Sleep(1 * time.Second)
 					return assert.AnError
 				})
+				// ensure the first goroutine holds the only slot
+				synctest.Wait()
 				// second goroutine blocks on semaphore; Acquire should fail on ctx cancellation
 				s.Go(func(ctx context.Context) error {
 					goroutine2Ran.Store(true)

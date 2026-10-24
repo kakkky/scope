@@ -79,7 +79,7 @@ func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 // Calling Go after Run has returned panics. Goroutines must be spawned while
 // Run is executing.
 func (s *Scope) Go(fn func(ctx context.Context) error) {
-	s.spawnGoroutine(fn)
+	s.spawnGoroutine(fn, nil)
 }
 
 // GoFuture starts fn in a new goroutine bound to the scope and returns a Future
@@ -89,7 +89,7 @@ func (s *Scope) Go(fn func(ctx context.Context) error) {
 // scope's error handling mechanism (same as Go) and is also returned by Wait.
 func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[T] {
 	future := newFuture[T]()
-	spawned := s.spawnGoroutine(func(ctx context.Context) (err error) {
+	s.spawnGoroutine(func(ctx context.Context) (err error) {
 		var v T
 		defer func() {
 			if r := recover(); r != nil {
@@ -99,11 +99,10 @@ func (s *Scope) GoFuture[T any](fn func(ctx context.Context) (T, error)) Future[
 		}()
 		v, err = fn(ctx)
 		return err
-	})
-	if !spawned {
+	}, func(cause error) {
 		var zero T
-		future.resolve(zero, context.Cause(s.ctx))
-	}
+		future.resolve(zero, cause)
+	})
 	return future
 }
 
@@ -210,16 +209,11 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 	}
 }
 
-// spawnGoroutine reports whether fn was spawned. It returns false only when
-// the scope's context is canceled while waiting for a concurrency slot.
-func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) (spawned bool) {
-	if s.sem != nil {
-		if err := s.sem.Acquire(s.ctx, 1); err != nil {
-			// ctx is already canceled; the cause was recorded by the goroutine that triggered cancellation.
-			return false
-		}
-	}
-
+// spawnGoroutine runs fn in a new goroutine registered on the scope.
+// If the scope's context is canceled while the goroutine waits for a
+// concurrency slot, fn is never run and onFnSkipped, if non-nil, is called
+// with the cancellation cause.
+func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error, onFnSkipped func(cause error)) {
 	s.cond.L.Lock()
 	if s.closed {
 		s.cond.L.Unlock()
@@ -237,11 +231,18 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) (spawned bool
 			}
 			s.cond.L.Unlock()
 		}()
-		defer func() {
-			if s.sem != nil {
-				s.sem.Release(1)
+		// Acquiring inside the goroutine keeps Go non-blocking, so a goroutine
+		// holding a slot can call Go recursively without deadlocking.
+		if s.sem != nil {
+			if err := s.sem.Acquire(s.ctx, 1); err != nil {
+				// ctx is already canceled; the cause was recorded by whoever triggered cancellation.
+				if onFnSkipped != nil {
+					onFnSkipped(context.Cause(s.ctx))
+				}
+				return
 			}
-		}()
+			defer s.sem.Release(1)
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				err := newPanicError(r)
@@ -262,7 +263,6 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error) (spawned bool
 			s.cancel(errCanceledOnSuccess)
 		}
 	}()
-	return true
 }
 
 func newPanicError(r any) error {

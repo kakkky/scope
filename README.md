@@ -97,7 +97,7 @@ By default, only the first error is returned (first-error-wins). With this optio
 func WithMaxConcurrency(max int) Option
 ```
 
-Limits the number of goroutines that may execute concurrently within the scope. When the limit is reached, calls to `Go` block until a running goroutine completes or the scope's context is cancelled.
+Limits the number of goroutines that may execute concurrently within the scope. `Go` never blocks: when the limit is reached, the spawned goroutine waits for a running goroutine to complete before running `fn`. If the scope's context is cancelled while waiting, `fn` is never run.
 
 #### `WithTimeout`
 
