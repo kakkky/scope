@@ -115,6 +115,19 @@ func WithCancelOnSuccess() Option
 
 Cancels the scope's context as soon as any goroutine or child scope returns a nil error, allowing sibling goroutines to observe `ctx.Done()` and exit early. Errors returned by goroutines or child scopes after this cancellation (typically `ctx.Err()`) are discarded; errors that occurred before it and errors returned by `body` are still returned by `Run`, and panics are never discarded by this option.
 
+### Options and child scopes
+
+How options behave across a parent scope and a child scope created via `Scope.Scope`:
+
+- **Options apply only to the scope they are passed to.** They are not inherited by child scopes, and the options of a child scope never change how its parent behaves.
+- **A child scope is handled like a single goroutine from the parent's point of view.** The parent reacts to the child's result according to the parent's own options:
+  - `WithSupervisor` on the parent decides whether a failed child scope cancels the parent's context.
+  - `WithErrAggregation` on the parent decides whether the child's error is collected together with other errors.
+  - `WithCancelOnSuccess` on the parent treats a child scope that returns without error as a success.
+- **The options of a child scope only determine what the child returns**, such as a joined error under `WithErrAggregation` or `context.DeadlineExceeded` under `WithTimeout`.
+- **Cancellation flows from parent to child only.** Cancelling a scope cancels all of its descendants through the context, while a child affects its parent only through the result it returns. In particular, `WithTimeout` on the parent bounds all of its descendants; `WithTimeout` on a child can only shorten the deadline within that bound.
+- **`WithMaxConcurrency` counts only goroutines spawned via `Go` on that scope.** A child scope runs synchronously in the caller's goroutine and does not occupy a slot of its parent's limit.
+
 ## Background
 
 This package is inspired by the structured concurrency concept:
