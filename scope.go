@@ -294,8 +294,9 @@ func (s *Scope) handleChildError(err error) {
 		s.recordErr(err)
 		s.cancel(err)
 	case s.cancelOnSuccess && errors.Is(context.Cause(s.ctx), errCanceledOnSuccess):
-		// Errors after a success-triggered cancellation are its consequences
-		// (typically ctx.Err()), so they are discarded.
+		// Errors after a success-triggered cancellation are discarded: they are
+		// typically ctx.Err() returned by goroutines that stopped because of
+		// the cancellation, not real failures.
 	case s.supervisor:
 		s.recordErr(err)
 	default:
