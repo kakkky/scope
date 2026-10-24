@@ -1716,7 +1716,7 @@ func TestRun_WithTimeout(t *testing.T) {
 		})
 	})
 
-	t.Run("earlier deadline on the parent context: the timeout has no effect", func(t *testing.T) {
+	t.Run("deadline of the context passed to Run is not mistaken for the scope's own timeout", func(t *testing.T) {
 		t.Parallel()
 
 		synctest.Test(t, func(t *testing.T) {
