@@ -54,8 +54,10 @@ func WithErrAggregation() Option {
 // WithMaxConcurrency returns an Option that limits the number of goroutines
 // that may execute concurrently within the scope.
 //
-// When the limit is reached, calls to Go block until a running goroutine
-// completes or the scope's context is canceled.
+// Go never blocks: when the limit is reached, the spawned goroutine waits for
+// a running goroutine to complete before running fn. If the scope's context is
+// canceled while waiting, fn is never run. The limit applies to fn executions,
+// not to goroutines waiting for a slot.
 //
 // This option is not inherited by child scopes created via Scope.Scope;
 // each scope must opt in independently.
