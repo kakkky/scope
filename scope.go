@@ -146,6 +146,8 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 		if !s.supervisor {
 			s.cancel(err)
 		}
+	} else if s.cancelOnSuccess {
+		s.cancel(errCanceledOnSuccess)
 	}
 }
 

@@ -97,6 +97,9 @@ func WithTimeout(d time.Duration) Option {
 // WithCancelOnSuccess returns an Option that cancels the scope's context as soon
 // as any spawned goroutine returns a nil error.
 //
+// A child scope created via Scope.Scope counts as a success when it returns
+// without error, in the same way as a goroutine spawned via Go.
+//
 // By default, the scope's context is only canceled when a goroutine returns a
 // non-nil error. With this option, a successful return also triggers
 // cancellation, allowing sibling goroutines to observe ctx.Done() and exit

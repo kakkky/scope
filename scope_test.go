@@ -214,6 +214,27 @@ func TestRun(t *testing.T) {
 			},
 			wantCount: 11,
 		},
+		{
+			name: "WithCancelOnSuccess: child scope success cancels parent",
+			opts: []scope.Option{scope.WithCancelOnSuccess()},
+			body: func(s *scope.Scope, count *atomic.Int64) error {
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						count.Add(1)
+						return nil
+					})
+					return nil
+				})
+				s.Go(func(ctx context.Context) error {
+					if ctx.Err() == nil {
+						count.Add(10)
+					}
+					return nil
+				})
+				return nil
+			},
+			wantCount: 1,
+		},
 		// GoFuture
 		{
 			name: "GoFuture: returns value produced by goroutine",
