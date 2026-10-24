@@ -554,3 +554,34 @@ func ExampleScope_GoFuture_dag() {
 	// Output:
 	// 14
 }
+
+// ExampleScope_GoFuture_waitAfterRun shows how to collect results after Run returns.
+// With WithSupervisor, a failure in one task does not cancel the others,
+// so each Future can be inspected individually to handle partial success.
+func ExampleScope_GoFuture_waitAfterRun() {
+	var userF, ordersF scope.Future[string]
+	err := scope.Run(context.Background(), func(s *scope.Scope) error {
+		userF = s.GoFuture(func(ctx context.Context) (string, error) {
+			return "alice", nil
+		})
+		ordersF = s.GoFuture(func(ctx context.Context) (string, error) {
+			return "", errors.New("orders: service unavailable")
+		})
+		return nil
+	}, scope.WithSupervisor(), scope.WithErrAggregation())
+
+	fmt.Println("Run:", err)
+
+	// Run has already waited for every goroutine, so Wait returns immediately.
+	if user, err := userF.Wait(); err == nil {
+		fmt.Println("user:", user)
+	}
+	if _, err := ordersF.Wait(); err != nil {
+		fmt.Println("orders failed:", err)
+	}
+
+	// Output:
+	// Run: orders: service unavailable
+	// user: alice
+	// orders failed: orders: service unavailable
+}
