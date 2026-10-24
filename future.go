@@ -1,33 +1,39 @@
 package scope
 
-import "context"
-
 // Future represents a value that will be produced by a goroutine started with Scope.GoFuture.
 // The zero value is not usable; obtain one via Scope.GoFuture.
 type Future[T any] struct {
-	ctx     context.Context
-	valueCh chan T
+	r *result[T]
 }
 
-func newFuture[T any](ctx context.Context) Future[T] {
-	return Future[T]{
-		ctx:     ctx,
-		valueCh: make(chan T, 1),
-	}
+// result is written exactly once before done is closed, so readers that
+// receive from done observe val and err without further synchronization.
+type result[T any] struct {
+	done chan struct{}
+	val  T
+	err  error
 }
 
-func (f Future[T]) set(value T) {
-	f.valueCh <- value
+func newFuture[T any]() Future[T] {
+	return Future[T]{r: &result[T]{done: make(chan struct{})}}
 }
 
-// Wait blocks until the goroutine produces a value and returns it, or until ctx
-// is canceled, in which case it returns the zero value of T and ctx.Err().
+func (f Future[T]) resolve(val T, err error) {
+	f.r.val, f.r.err = val, err
+	close(f.r.done)
+}
+
+// Wait blocks until the goroutine started by Scope.GoFuture has finished and
+// returns the value and error returned by fn.
+//
+// If fn panics, Wait returns the zero value of T and an error describing the panic.
+// If fn was never started because the scope's context was canceled while
+// waiting for a concurrency slot (see WithMaxConcurrency), Wait returns the
+// zero value of T and the cancellation cause of the scope.
+//
+// Wait may be called any number of times, from any goroutine, and also after
+// Run has returned; every call returns the same result.
 func (f Future[T]) Wait() (T, error) {
-	select {
-	case v := <-f.valueCh:
-		return v, nil
-	case <-f.ctx.Done():
-		var zero T
-		return zero, f.ctx.Err()
-	}
+	<-f.r.done
+	return f.r.val, f.r.err
 }
