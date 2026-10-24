@@ -105,8 +105,11 @@ func WithTimeout(d time.Duration) Option {
 // cancellation, allowing sibling goroutines to observe ctx.Done() and exit
 // early.
 //
-// Run returns nil when this option triggers the cancellation, even if
-// other goroutines subsequently return ctx.Err().
+// Errors returned by goroutines or child scopes after this option has
+// triggered the cancellation are discarded, since they are typically ctx.Err().
+// Errors recorded before the cancellation and errors returned by the body
+// function are still returned by Run, and panics are never discarded by this
+// option.
 //
 // This option is not inherited by child scopes created via Scope.Scope;
 // each scope must opt in independently. Cancellation, however, propagates to

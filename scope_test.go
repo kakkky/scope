@@ -701,6 +701,27 @@ func TestRun_Error(t *testing.T) {
 			opts:     []scope.Option{scope.WithSupervisor(), scope.WithErrAggregation()},
 			wantErrs: []error{errA, errB, errC},
 		},
+		{
+			name: "WithCancelOnSuccess: body error returned after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				time.Sleep(time.Second)
+				return errA
+			},
+			opts:     []scope.Option{scope.WithCancelOnSuccess()},
+			wantErrs: []error{errA},
+		},
+		{
+			name: "WithCancelOnSuccess+WithSupervisor: error recorded before a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return errA })
+				time.Sleep(time.Second)
+				s.Go(func(ctx context.Context) error { return nil })
+				return nil
+			},
+			opts:     []scope.Option{scope.WithCancelOnSuccess(), scope.WithSupervisor()},
+			wantErrs: []error{errA},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -731,6 +752,63 @@ func TestRun_Error(t *testing.T) {
 		isB := errors.Is(err, errB)
 		assert.True(t, isA != isB, "only one of errA or errB should propagate, not both")
 	})
+}
+
+func TestRun_PanicAfterCancelOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body func(s *scope.Scope) error
+	}{
+		{
+			name: "Go: panic after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+		},
+		{
+			name: "GoFuture: panic after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				s.GoFuture(func(ctx context.Context) (int, error) {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+		},
+		{
+			name: "child scope: panic in a child goroutine after a success is not discarded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return nil })
+				s.Scope(func(child *scope.Scope) error {
+					child.Go(func(ctx context.Context) error {
+						<-ctx.Done()
+						panic("boom")
+					})
+					return nil
+				})
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				err := scope.Run(t.Context(), tt.body, scope.WithCancelOnSuccess())
+				assert.ErrorContains(t, err, "scope: panic recovered: boom")
+			})
+		})
+	}
 }
 
 func TestRun_Cancel(t *testing.T) {

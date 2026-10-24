@@ -142,6 +142,9 @@ func (s *Scope) Scope(body func(child *Scope) error, opts ...Option) {
 	s.cond.L.Unlock()
 
 	if err := run(s.ctx, body, opts...); err != nil {
+		if s.shouldDiscard(err) {
+			return
+		}
 		s.recordErr(err)
 		if !s.supervisor {
 			s.cancel(err)
@@ -209,8 +212,6 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 			return errors.Join(append(s.errs, cause)...)
 		}
 		return cause
-	case o.cancelOnSuccess && errors.Is(cause, errCanceledOnSuccess):
-		return nil
 	case s.errAggregation:
 		return errors.Join(s.errs...)
 	default:
@@ -275,6 +276,9 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error, onFnSkipped f
 		}()
 
 		if err := fn(s.ctx); err != nil {
+			if s.shouldDiscard(err) {
+				return
+			}
 			s.recordErr(err)
 			if !s.supervisor {
 				s.cancel(err)
@@ -285,8 +289,31 @@ func (s *Scope) spawnGoroutine(fn func(ctx context.Context) error, onFnSkipped f
 	}()
 }
 
+// panicError is a panic recovered from a goroutine, distinguishable from
+// ordinary errors so that it is never discarded.
+type panicError struct {
+	value any
+	stack []byte
+}
+
+func (e *panicError) Error() string {
+	return fmt.Sprintf("scope: panic recovered: %v\n%s", e.value, e.stack)
+}
+
 func newPanicError(r any) error {
-	return fmt.Errorf("scope: panic recovered: %v\n%s", r, debug.Stack())
+	return &panicError{value: r, stack: debug.Stack()}
+}
+
+// shouldDiscard reports whether err should be discarded because
+// WithCancelOnSuccess has already canceled the scope. Such errors are treated
+// as consequences of the cancellation (typically ctx.Err()). Panics are never
+// discarded, including those that reach here as errors via GoFuture or a
+// child scope.
+func (s *Scope) shouldDiscard(err error) bool {
+	var pe *panicError
+	return s.cancelOnSuccess &&
+		errors.Is(context.Cause(s.ctx), errCanceledOnSuccess) &&
+		!errors.As(err, &pe)
 }
 
 // recordErr stores err according to the aggregation policy.
