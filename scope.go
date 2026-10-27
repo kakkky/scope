@@ -22,8 +22,9 @@ var (
 // Scope represents a structured concurrency scope.
 //
 // A Scope owns a derived context.Context that is canceled when any spawned
-// goroutine returns a non-nil error, when a panic is recovered, when the body
-// function passed to Run returns a non-nil error, or when Run returns.
+// goroutine returns a non-nil error, when a panic is recovered (even with
+// WithSupervisor), when the body function passed to Run returns a non-nil
+// error, or when Run returns.
 //
 // A Scope must be obtained via Run; callers should not construct one directly.
 // The zero value of Scope is not usable.
@@ -61,15 +62,17 @@ type Scope struct {
 // by the time Run returns, regardless of whether body returns normally,
 // returns an error, or panics. A panic in body is not recovered: the scope's
 // context is canceled, Run waits for all spawned goroutines, and then the
-// panic continues to propagate to the caller.
+// panic continues to propagate to the caller, even if a panic in a goroutine
+// was already recovered.
 //
 // If body returns a non-nil error, the scope's context is canceled and the
 // error is returned. If any spawned goroutine returns a non-nil error or
 // panics, the scope's context is canceled and the first such error is
 // returned. Panics from spawned goroutines are recovered and converted into
-// errors; they do not crash the process. A recovered panic takes precedence
-// over ordinary errors: if any goroutine panicked, Run returns the first panic
-// instead of the first error.
+// errors wrapping ErrPanicRecovered; they do not crash the process. A
+// recovered panic always cancels the scope's context, even with
+// WithSupervisor, and takes precedence over ordinary errors regardless of
+// options: if any goroutine panicked, Run returns only the first panic.
 //
 // The context passed to body and to each spawned goroutine is derived from
 // parent and is canceled as described above. Callers should observe this
@@ -86,8 +89,10 @@ func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 //
 // If fn returns a non-nil error, the scope's context is canceled and the
 // error becomes the result of Run (unless an earlier error has already been
-// recorded). If fn panics, the panic is recovered, formatted as an error
-// with a stack trace, and propagated through the same mechanism.
+// recorded). If fn panics, the panic is recovered into an error wrapping
+// ErrPanicRecovered with a stack trace, the scope's context is canceled even
+// with WithSupervisor, and the error becomes the result of Run in preference
+// to ordinary errors.
 //
 // Go may be called from inside body, from inside another goroutine spawned by
 // the same scope, or recursively, as long as Run has not yet returned.

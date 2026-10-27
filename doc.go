@@ -20,16 +20,19 @@ for cooperative cancellation.
 
 # Errors and panics
 
-By default, Run returns only the first error (first-error-wins); with WithErrAggregation, it
-returns all errors joined via errors.Join. A panic in a goroutine spawned via Go or GoFuture is
-recovered into an error and handled like any other error, but it takes precedence over ordinary
-errors when Run picks the error to return, and WithCancelOnSuccess never discards it. A panic in
-the body passed to Run or Scope.Scope is not recovered: the scope is canceled, its goroutines
-are waited for, and the panic propagates to the caller.
+A panic in a goroutine spawned via Go or GoFuture is recovered into an error wrapping
+ErrPanicRecovered. Regardless of options, a recovered panic cancels the scope's context, so
+that no goroutine is left running, and Run returns only the first panic. WithSupervisor does
+not prevent the cancellation, WithCancelOnSuccess never discards a panic, and
+WithErrAggregation does not join a panic with other errors. A panic in the body passed to Run
+or Scope.Scope is not recovered: the scope is canceled, its goroutines are waited for, and the
+panic propagates to the caller, even if a panic in a goroutine was already recovered.
 
-When the scope's own WithTimeout fires, Run returns context.DeadlineExceeded. A deadline of the
-context passed to Run is not treated as the scope's own timeout; its error is returned only if
-something in the scope returns it.
+When no panic was recovered, Run returns only the first error by default (first-error-wins);
+with WithErrAggregation, it returns all errors joined via errors.Join. When the scope's own
+WithTimeout fires, Run returns context.DeadlineExceeded (with WithErrAggregation, joined with
+all other errors). A deadline of the context passed to Run is not treated as the scope's own
+timeout; its error is returned only if something in the scope returns it.
 
 # Options and child scopes
 
@@ -41,9 +44,9 @@ From the parent's point of view, a child scope created via Scope.Scope is handle
 single goroutine spawned via Scope.Go (except that a panic in the child's body is not recovered
 and propagates to the parent's body), and the parent reacts to the child's result according
 to the parent's own options: WithSupervisor decides whether a failed child cancels the
-parent's context, WithErrAggregation decides whether the child's error is collected together
-with other errors, and WithCancelOnSuccess treats a child that returns without error as a
-success. The options of the child only determine what the child returns, such as a joined
+parent's context (a panic in the child always does), WithErrAggregation decides whether the
+child's error is collected together with other errors, and WithCancelOnSuccess treats a child
+that returns without error as a success. The options of the child only determine what the child returns, such as a joined
 error under WithErrAggregation or context.DeadlineExceeded under WithTimeout.
 
 Cancellation flows from parent to child only: canceling a scope cancels all of its
