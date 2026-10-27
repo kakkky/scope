@@ -10,10 +10,13 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+// ErrPanicRecovered is wrapped by the error that Run and Future.Wait return
+// for a panic recovered from a spawned goroutine. Use errors.Is to detect it.
+var ErrPanicRecovered = errors.New("scope: panic recovered")
+
 var (
 	errCanceledOnSuccess = errors.New("scope: canceled on first success")
 	errBodyNotReturned   = errors.New("scope: body did not return normally")
-	errPanicRecovered    = errors.New("scope: panic recovered")
 )
 
 // Scope represents a structured concurrency scope.
@@ -286,11 +289,9 @@ func (s *Scope) handleChildError(err error) {
 		s.cancel(errCanceledOnSuccess)
 	case err == nil:
 		// A success needs no reaction without WithCancelOnSuccess.
-	case errors.Is(err, errPanicRecovered) && s.supervisor:
+	case errors.Is(err, ErrPanicRecovered):
 		// Panics, which may arrive as errors via GoFuture or a child scope,
-		// are never discarded.
-		s.recordErr(err)
-	case errors.Is(err, errPanicRecovered):
+		// are never discarded and cancel the scope even in supervisor mode.
 		s.recordErr(err)
 		s.cancel(err)
 	case s.cancelOnSuccess && errors.Is(context.Cause(s.ctx), errCanceledOnSuccess):
@@ -306,26 +307,27 @@ func (s *Scope) handleChildError(err error) {
 }
 
 func newPanicRecoveredError(r any) error {
-	return fmt.Errorf("%w: %v\n%s", errPanicRecovered, r, debug.Stack())
+	return fmt.Errorf("%w: %v\n%s", ErrPanicRecovered, r, debug.Stack())
 }
 
-// recordErr stores err according to the aggregation policy.
-// In aggregation mode, all errors are collected for errors.Join at the end of Run.
-// Otherwise, only the first error is kept via errOnce, and the first recovered
-// panic is kept separately via panicOnce so that it takes precedence.
+// recordErr stores err so that Run can pick the error to return.
+// The first recovered panic is kept separately via panicOnce so that it takes
+// precedence regardless of the aggregation policy. Otherwise, in aggregation
+// mode, all errors are collected for errors.Join at the end of Run, and only
+// the first error is kept via errOnce when not.
 func (s *Scope) recordErr(err error) {
-	if s.errAggregation {
+	switch {
+	case errors.Is(err, ErrPanicRecovered):
+		s.panicOnce.Do(func() {
+			s.panicErr = err
+		})
+	case s.errAggregation:
 		s.errsMu.Lock()
 		s.errs = append(s.errs, err)
 		s.errsMu.Unlock()
-		return
-	}
-	s.errOnce.Do(func() {
-		s.err = err
-	})
-	if errors.Is(err, errPanicRecovered) {
-		s.panicOnce.Do(func() {
-			s.panicErr = err
+	default:
+		s.errOnce.Do(func() {
+			s.err = err
 		})
 	}
 }
