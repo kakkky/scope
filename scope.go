@@ -50,6 +50,8 @@ type Scope struct {
 	sem *semaphore.Weighted
 
 	cancelOnSuccess bool
+
+	ownScopeTimeoutCause error
 }
 
 // Run executes body inside a new Scope derived from parent and waits for all
@@ -180,6 +182,8 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		supervisor:      o.supervisor,
 		errAggregation:  o.errAggregation,
 		cancelOnSuccess: o.cancelOnSuccess,
+
+		ownScopeTimeoutCause: ownScopeTimeoutCause,
 	}
 
 	if o.maxConcurrency > 0 {
@@ -209,14 +213,19 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	s.waitAndClose()
 
-	ownScopeTimedOut := ownScopeTimeoutCause != nil && context.Cause(s.ctx) == ownScopeTimeoutCause
+	return s.resultErr()
+}
+
+// resultErr picks the error that Run returns once every spawned goroutine has
+// finished.
+func (s *Scope) resultErr() error {
+	ownScopeTimedOut := s.ownScopeTimeoutCause != nil && context.Cause(s.ctx) == s.ownScopeTimeoutCause
 	switch {
 	case s.panicErr != nil:
 		return s.panicErr
+	case ownScopeTimedOut && s.errAggregation:
+		return errors.Join(append(s.errs, context.DeadlineExceeded)...)
 	case ownScopeTimedOut:
-		if s.errAggregation {
-			return errors.Join(append(s.errs, context.DeadlineExceeded)...)
-		}
 		return context.DeadlineExceeded
 	case s.errAggregation:
 		return errors.Join(s.errs...)
