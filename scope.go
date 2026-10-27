@@ -10,17 +10,21 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+// ErrPanicRecovered is wrapped by the error that Run and Future.Wait return
+// for a panic recovered from a spawned goroutine. Use errors.Is to detect it.
+var ErrPanicRecovered = errors.New("scope: panic recovered")
+
 var (
 	errCanceledOnSuccess = errors.New("scope: canceled on first success")
 	errBodyNotReturned   = errors.New("scope: body did not return normally")
-	errPanicRecovered    = errors.New("scope: panic recovered")
 )
 
 // Scope represents a structured concurrency scope.
 //
 // A Scope owns a derived context.Context that is canceled when any spawned
-// goroutine returns a non-nil error, when a panic is recovered, when the body
-// function passed to Run returns a non-nil error, or when Run returns.
+// goroutine returns a non-nil error, when a panic is recovered (even with
+// WithSupervisor), when the body function passed to Run returns a non-nil
+// error, or when Run returns.
 //
 // A Scope must be obtained via Run; callers should not construct one directly.
 // The zero value of Scope is not usable.
@@ -47,6 +51,8 @@ type Scope struct {
 	sem *semaphore.Weighted
 
 	cancelOnSuccess bool
+
+	ownScopeTimeoutCause error
 }
 
 // Run executes body inside a new Scope derived from parent and waits for all
@@ -56,15 +62,17 @@ type Scope struct {
 // by the time Run returns, regardless of whether body returns normally,
 // returns an error, or panics. A panic in body is not recovered: the scope's
 // context is canceled, Run waits for all spawned goroutines, and then the
-// panic continues to propagate to the caller.
+// panic continues to propagate to the caller, even if a panic in a goroutine
+// was already recovered.
 //
 // If body returns a non-nil error, the scope's context is canceled and the
 // error is returned. If any spawned goroutine returns a non-nil error or
 // panics, the scope's context is canceled and the first such error is
 // returned. Panics from spawned goroutines are recovered and converted into
-// errors; they do not crash the process. A recovered panic takes precedence
-// over ordinary errors: if any goroutine panicked, Run returns the first panic
-// instead of the first error.
+// errors wrapping ErrPanicRecovered; they do not crash the process. A
+// recovered panic always cancels the scope's context, even with
+// WithSupervisor, and takes precedence over ordinary errors regardless of
+// options: if any goroutine panicked, Run returns only the first panic.
 //
 // The context passed to body and to each spawned goroutine is derived from
 // parent and is canceled as described above. Callers should observe this
@@ -81,8 +89,10 @@ func Run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 //
 // If fn returns a non-nil error, the scope's context is canceled and the
 // error becomes the result of Run (unless an earlier error has already been
-// recorded). If fn panics, the panic is recovered, formatted as an error
-// with a stack trace, and propagated through the same mechanism.
+// recorded). If fn panics, the panic is recovered into an error wrapping
+// ErrPanicRecovered with a stack trace, the scope's context is canceled even
+// with WithSupervisor, and the error becomes the result of Run in preference
+// to ordinary errors.
 //
 // Go may be called from inside body, from inside another goroutine spawned by
 // the same scope, or recursively, as long as Run has not yet returned.
@@ -177,6 +187,8 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 		supervisor:      o.supervisor,
 		errAggregation:  o.errAggregation,
 		cancelOnSuccess: o.cancelOnSuccess,
+
+		ownScopeTimeoutCause: ownScopeTimeoutCause,
 	}
 
 	if o.maxConcurrency > 0 {
@@ -206,14 +218,19 @@ func run(ctx context.Context, body func(s *Scope) error, opts ...Option) error {
 
 	s.waitAndClose()
 
-	ownScopeTimedOut := ownScopeTimeoutCause != nil && context.Cause(s.ctx) == ownScopeTimeoutCause
+	return s.resultErr()
+}
+
+// resultErr picks the error that Run returns once every spawned goroutine has
+// finished.
+func (s *Scope) resultErr() error {
+	ownScopeTimedOut := s.ownScopeTimeoutCause != nil && context.Cause(s.ctx) == s.ownScopeTimeoutCause
 	switch {
 	case s.panicErr != nil:
 		return s.panicErr
+	case ownScopeTimedOut && s.errAggregation:
+		return errors.Join(append(s.errs, context.DeadlineExceeded)...)
 	case ownScopeTimedOut:
-		if s.errAggregation {
-			return errors.Join(append(s.errs, context.DeadlineExceeded)...)
-		}
 		return context.DeadlineExceeded
 	case s.errAggregation:
 		return errors.Join(s.errs...)
@@ -286,11 +303,9 @@ func (s *Scope) handleChildError(err error) {
 		s.cancel(errCanceledOnSuccess)
 	case err == nil:
 		// A success needs no reaction without WithCancelOnSuccess.
-	case errors.Is(err, errPanicRecovered) && s.supervisor:
+	case errors.Is(err, ErrPanicRecovered):
 		// Panics, which may arrive as errors via GoFuture or a child scope,
-		// are never discarded.
-		s.recordErr(err)
-	case errors.Is(err, errPanicRecovered):
+		// are never discarded and cancel the scope even in supervisor mode.
 		s.recordErr(err)
 		s.cancel(err)
 	case s.cancelOnSuccess && errors.Is(context.Cause(s.ctx), errCanceledOnSuccess):
@@ -306,26 +321,27 @@ func (s *Scope) handleChildError(err error) {
 }
 
 func newPanicRecoveredError(r any) error {
-	return fmt.Errorf("%w: %v\n%s", errPanicRecovered, r, debug.Stack())
+	return fmt.Errorf("%w: %v\n%s", ErrPanicRecovered, r, debug.Stack())
 }
 
-// recordErr stores err according to the aggregation policy.
-// In aggregation mode, all errors are collected for errors.Join at the end of Run.
-// Otherwise, only the first error is kept via errOnce, and the first recovered
-// panic is kept separately via panicOnce so that it takes precedence.
+// recordErr stores err so that Run can pick the error to return.
+// The first recovered panic is kept separately via panicOnce so that it takes
+// precedence regardless of the aggregation policy. Otherwise, in aggregation
+// mode, all errors are collected for errors.Join at the end of Run, and only
+// the first error is kept via errOnce when not.
 func (s *Scope) recordErr(err error) {
-	if s.errAggregation {
+	switch {
+	case errors.Is(err, ErrPanicRecovered):
+		s.panicOnce.Do(func() {
+			s.panicErr = err
+		})
+	case s.errAggregation:
 		s.errsMu.Lock()
 		s.errs = append(s.errs, err)
 		s.errsMu.Unlock()
-		return
-	}
-	s.errOnce.Do(func() {
-		s.err = err
-	})
-	if errors.Is(err, errPanicRecovered) {
-		s.panicOnce.Do(func() {
-			s.panicErr = err
+	default:
+		s.errOnce.Do(func() {
+			s.err = err
 		})
 	}
 }

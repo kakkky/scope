@@ -25,8 +25,9 @@ type options struct {
 // affects only goroutines within the child; a failure in it still cancels a
 // parent that is not in supervisor mode.
 //
-// Note that a non-nil error returned directly from the body function still
-// cancels the scope's context regardless of this option.
+// Note that a non-nil error returned directly from the body function and a
+// panic recovered from a goroutine or child scope still cancel the scope's
+// context regardless of this option.
 //
 // Goroutines spawned via Go from within another goroutine are registered
 // on the same scope and treated as siblings in terms of context cancellation.
@@ -42,8 +43,11 @@ func WithSupervisor() Option {
 // WithErrAggregation returns an Option that enables error aggregation for the scope.
 //
 // By default, only the first non-nil error is recorded (first-error-wins).
-// With this option, all errors from goroutines and the body are collected and
-// returned as a single error via errors.Join when Run returns.
+// With this option, all errors from goroutines and the body, including
+// context.DeadlineExceeded from the scope's own WithTimeout, are collected and
+// returned as a single error via errors.Join when Run returns. A recovered
+// panic still takes precedence: if any goroutine panicked, Run returns only the
+// first panic.
 //
 // This option is not inherited by child scopes created via Scope.Scope;
 // each scope must opt in independently.

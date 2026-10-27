@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,7 +91,7 @@ func ExampleRun_panicRecovery() {
 		return nil
 	})
 
-	fmt.Println(strings.Contains(err.Error(), "scope: panic recovered: something bad"))
+	fmt.Println(errors.Is(err, scope.ErrPanicRecovered))
 
 	// Output: true
 }

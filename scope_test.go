@@ -855,6 +855,43 @@ func TestRun_PanicPriority(t *testing.T) {
 			},
 			opts: []scope.Option{scope.WithTimeout(1 * time.Second)},
 		},
+		// WithErrAggregation
+		{
+			name: "WithErrAggregation: panic after an ordinary error is returned without it",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return assert.AnError })
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+			opts: []scope.Option{scope.WithErrAggregation()},
+		},
+		{
+			name: "WithErrAggregation: panic after the scope's own timeout is returned without DeadlineExceeded",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error {
+					<-ctx.Done()
+					panic("boom")
+				})
+				return nil
+			},
+			opts: []scope.Option{scope.WithTimeout(1 * time.Second), scope.WithErrAggregation()},
+		},
+		// WithSupervisor + WithErrAggregation
+		{
+			name: "WithSupervisor+WithErrAggregation: panic is returned without ordinary errors",
+			body: func(s *scope.Scope) error {
+				s.Go(func(ctx context.Context) error { return assert.AnError })
+				s.Go(func(ctx context.Context) error {
+					time.Sleep(time.Second)
+					panic("boom")
+				})
+				return nil
+			},
+			opts: []scope.Option{scope.WithSupervisor(), scope.WithErrAggregation()},
+		},
 	}
 
 	for _, tt := range tests {
@@ -863,7 +900,10 @@ func TestRun_PanicPriority(t *testing.T) {
 
 			synctest.Test(t, func(t *testing.T) {
 				err := scope.Run(t.Context(), tt.body, tt.opts...)
+				assert.ErrorIs(t, err, scope.ErrPanicRecovered)
 				assert.ErrorContains(t, err, "scope: panic recovered: boom")
+				_, joined := err.(interface{ Unwrap() []error })
+				assert.False(t, joined, "panic should be returned alone, not joined with other errors")
 			})
 		})
 	}
@@ -1020,6 +1060,21 @@ func TestRun_PanicInBody(t *testing.T) {
 			})
 		})
 		assert.EqualError(t, cause, "scope: body did not return normally")
+	})
+
+	t.Run("body panic propagates even after a goroutine panic was recovered", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			assert.PanicsWithValue(t, "body boom", func() {
+				scope.Run(t.Context(), func(s *scope.Scope) error {
+					s.Go(func(ctx context.Context) error { panic("goroutine boom") })
+					// ensure the goroutine panic has been recovered before body panics
+					synctest.Wait()
+					panic("body boom")
+				})
+			})
+		})
 	})
 
 	t.Run("scope is closed after body panic: Go panics when called after Run unwound", func(t *testing.T) {
@@ -1272,27 +1327,49 @@ func TestRun_WithSupervisor(t *testing.T) {
 		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled")
 	})
 
-	t.Run("panic does not cancel sibling goroutines", func(t *testing.T) {
+	t.Run("panic cancels sibling goroutines even in supervisor mode", func(t *testing.T) {
 		t.Parallel()
 
-		ch := make(chan struct{})
 		var observed atomic.Bool
 
 		err := scope.Run(t.Context(), func(s *scope.Scope) error {
 			s.Go(func(ctx context.Context) error {
-				close(ch)
 				panic("boom")
 			})
 			s.Go(func(ctx context.Context) error {
-				<-ch
-				observed.Store(ctx.Err() == nil)
+				<-ctx.Done()
+				observed.Store(true)
 				return nil
 			})
 			return nil
 		}, scope.WithSupervisor())
 
-		assert.Error(t, err)
-		assert.True(t, observed.Load(), "sibling goroutine should not have been cancelled after panic")
+		assert.ErrorIs(t, err, scope.ErrPanicRecovered)
+		assert.True(t, observed.Load(), "sibling goroutine should have been cancelled after panic")
+	})
+
+	t.Run("panic in a supervisor child scope cancels a supervisor parent", func(t *testing.T) {
+		t.Parallel()
+
+		var observed atomic.Bool
+
+		err := scope.Run(t.Context(), func(s *scope.Scope) error {
+			s.Go(func(ctx context.Context) error {
+				<-ctx.Done()
+				observed.Store(true)
+				return nil
+			})
+			s.Scope(func(child *scope.Scope) error {
+				child.Go(func(ctx context.Context) error {
+					panic("boom")
+				})
+				return nil
+			}, scope.WithSupervisor())
+			return nil
+		}, scope.WithSupervisor())
+
+		assert.ErrorIs(t, err, scope.ErrPanicRecovered)
+		assert.True(t, observed.Load(), "goroutine in the parent should have been cancelled after panic in the child")
 	})
 
 	t.Run("body error cancels goroutines even in supervisor mode", func(t *testing.T) {
@@ -1457,30 +1534,6 @@ func TestRun_WithMaxConcurrency(t *testing.T) {
 			})
 		})
 	}
-
-	t.Run("semaphore is released on panic so next goroutine can proceed", func(t *testing.T) {
-		t.Parallel()
-
-		synctest.Test(t, func(t *testing.T) {
-			var reached atomic.Bool
-
-			err := scope.Run(context.Background(), func(s *scope.Scope) error {
-				s.Go(func(ctx context.Context) error {
-					panic("boom")
-				})
-				// ensure the first goroutine has panicked and released its slot
-				synctest.Wait()
-				s.Go(func(ctx context.Context) error {
-					reached.Store(true)
-					return nil
-				})
-				return nil
-			}, scope.WithMaxConcurrency(1), scope.WithSupervisor())
-
-			assert.Error(t, err)
-			assert.True(t, reached.Load(), "second goroutine should have acquired semaphore after panic released it")
-		})
-	})
 
 	t.Run("goroutine waiting on semaphore exits cleanly on ctx cancellation", func(t *testing.T) {
 		t.Parallel()
