@@ -1062,6 +1062,21 @@ func TestRun_PanicInBody(t *testing.T) {
 		assert.EqualError(t, cause, "scope: body did not return normally")
 	})
 
+	t.Run("body panic propagates even after a goroutine panic was recovered", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			assert.PanicsWithValue(t, "body boom", func() {
+				scope.Run(t.Context(), func(s *scope.Scope) error {
+					s.Go(func(ctx context.Context) error { panic("goroutine boom") })
+					// ensure the goroutine panic has been recovered before body panics
+					synctest.Wait()
+					panic("body boom")
+				})
+			})
+		})
+	})
+
 	t.Run("scope is closed after body panic: Go panics when called after Run unwound", func(t *testing.T) {
 		t.Parallel()
 
